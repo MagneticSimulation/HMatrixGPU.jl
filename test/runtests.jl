@@ -2,5 +2,6 @@ using HMatrixGPU
 using Test
 
 @testset "HMatrixGPU.jl" begin
-    # Write your tests here.
+    include("test_tree.jl")
+    include("test_block.jl")
 end
