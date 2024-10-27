@@ -1,5 +1,7 @@
 module HMatrixGPU
 
-# Write your package code here.
+include("tree.jl")
+
+export ClusterTree, info
 
 end
