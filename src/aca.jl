@@ -7,7 +7,7 @@ Finds the index of the maximum element in `arr` that is not in `disallowed`.
 If all indices are disallowed, returns -1.
 """
 function argmax_not_in_list(arr, disallowed)
-    sorted_indices = sortperm(arr, rev=true)  # Sort indices by value in descending order
+    sorted_indices = sortperm(arr; rev=true)  # Sort indices by value in descending order
     for idx in sorted_indices
         if !(idx in disallowed)
             return idx  # Return the first index not in disallowed list
@@ -75,7 +75,7 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows)
 
         col_pivot_val = abs_row_residual[col_pivot]
         row_pivot_val = abs_col_residual[row_pivot]
-         
+
         if row_pivot_val > col_pivot_val
             residual_row .= calc_residual_rows(row_pivot)
             col_pivot = argmax_not_in_list(abs.(residual_row), used_col_pivots)
@@ -92,7 +92,7 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows)
         push!(right_vectors, residual_row / residual_row[col_pivot])
         push!(left_vectors, copy(residual_col))
 
-        step_size = sqrt(sum(left_vectors[end].^2) * sum(right_vectors[end].^2))
+        step_size = sqrt(sum(left_vectors[end] .^ 2) * sum(right_vectors[end] .^ 2))
 
         if step_size < eps
             break
@@ -104,7 +104,6 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows)
 
     return U_ACA, V_ACA
 end
-
 
 """
     SVD_recompress(U::Matrix, V::Matrix, eps::Float64)
@@ -125,7 +124,7 @@ function SVD_recompress(U::Matrix, V::Matrix, eps::Float64)
     # Perform QR decomposition on U and V'
     QU, RU = qr(U)
     QV, RV = qr(V')
-    
+
     # Perform SVD on the product of upper triangular matrices from QR decompositions
     W, SIG, Z = svd(RU * RV')
 
@@ -134,7 +133,7 @@ function SVD_recompress(U::Matrix, V::Matrix, eps::Float64)
 
     # Find the truncation rank where the cumulative Frobenius norm falls below eps
     rank_trunc = findfirst(x -> x < eps, frobenius_norms) - 1
-    
+
     # Compute the recompressed matrices U_SVD and V_SVD up to the truncated rank
     U_SVD = QU * (W[:, 1:rank_trunc] .* SIG[1:rank_trunc]')
     V_SVD = Z[:, 1:rank_trunc]' * QV'

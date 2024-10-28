@@ -5,16 +5,14 @@ using Test
 Random.seed!(10)
 
 N = 32;
-K = rand(N, N) 
+K = rand(N, N)
 coordinates = rand(3, N)  # N points in 3D space
-coordinates[3, :] .= 0 
+coordinates[3, :] .= 0
 
-source_tree = ClusterTree(coordinates, max_points_per_leaf=4)
-target_tree = ClusterTree(coordinates, max_points_per_leaf=8)
+source_tree = ClusterTree(coordinates; max_points_per_leaf=4)
+target_tree = ClusterTree(coordinates; max_points_per_leaf=8)
 
-
-block_tree = BlockTree(K, target_tree, source_tree, eta=1.5)
-
+block_tree = BlockTree(target_tree, source_tree; eta=1.5)
 
 # Test if the root node exists
 @testset "BlockTree Tests" begin
@@ -33,7 +31,7 @@ block_tree = BlockTree(K, target_tree, source_tree, eta=1.5)
     check_leaf_node_labels(block_tree.root)
 
     # Test admissible condition
-    block_tree_strict = BlockTree(K, target_tree, source_tree, eta=0.5)
+    block_tree_strict = BlockTree(target_tree, source_tree; eta=0.5)
     function check_admissible_conditions(node::HMatrixGPU.BlockTreeNode, eta)
         if node.is_admissible
             dist = norm(node.target_tree.center .- node.source_tree.center)
@@ -71,33 +69,30 @@ block_tree = BlockTree(K, target_tree, source_tree, eta=1.5)
     @test node_count > 0
 
     function test_block_matrix_multiplication(block_tree, K)
-    
-        direct, approx = HMatrixGPU.traverse(block_tree);
+        direct, approx = HMatrixGPU.traverse(block_tree)
         @test length(direct) > 0
         @test length(approx) > 0
 
         m, n = size(K)
-        x = rand(n);
-        y = zeros(m);
+        x = rand(n)
+        y = zeros(m)
         source_map = block_tree.source_index_map
         target_map = block_tree.target_index_map
 
         for (a, b) in direct
-            ida = view(target_map, a.start_idx:a.end_idx-1)
-            idb = view(source_map, b.start_idx:b.end_idx-1)
+            ida = view(target_map, (a.start_idx):(a.end_idx - 1))
+            idb = view(source_map, (b.start_idx):(b.end_idx - 1))
             y_view = view(y, ida)
-            y_view .+= K[ida, idb]*x[idb]
+            y_view .+= K[ida, idb] * x[idb]
         end
         for (a, b) in approx
-            ida = view(target_map, a.start_idx:a.end_idx-1)
-            idb = view(source_map, b.start_idx:b.end_idx-1)
+            ida = view(target_map, (a.start_idx):(a.end_idx - 1))
+            idb = view(source_map, (b.start_idx):(b.end_idx - 1))
             y_view = view(y, ida)
-            y_view .+= K[ida, idb]*x[idb]
+            y_view .+= K[ida, idb] * x[idb]
         end
-        @test isapprox(K*x, y; atol=1e-10)
+        @test isapprox(K * x, y; atol=1e-10)
     end
 
-    
     test_block_matrix_multiplication(block_tree, K)
 end
-
