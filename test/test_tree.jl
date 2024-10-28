@@ -13,3 +13,5 @@ s = info(cluster)
 
 @test s[:max_points] <= 10
 @test s[:min_points] >= 3
+
+
