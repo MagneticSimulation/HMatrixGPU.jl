@@ -24,8 +24,20 @@ end
 K = MyCustomMatrix(pts, pts)
 
 cluster = ClusterTree(pts; max_points_per_leaf=64)
-hmatrix = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-5)
+hmatrix = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6)
 
 d = info(hmatrix)
 
 @test d["compression_ratio"] > 3
+
+for M in hmatrix.dense_blocks
+    @test !any(isnan, M)
+end
+
+for (U,V) in hmatrix.approx_matrices
+    @test !any(isnan, U) && !any(isnan, V)
+end
+
+x = rand(N)
+
+@test isapprox(K * x, hmatrix * x; atol=1e-5)
