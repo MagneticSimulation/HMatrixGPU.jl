@@ -91,3 +91,69 @@ function build_block_tree!(node::BlockTreeNode, eta)
         build_block_tree!(node.right, eta)
     end
 end
+
+"""
+    merge_dense_matrices!(node::Union{Nothing, BlockTreeNode})
+
+Recursively merges dense matrix flags for a `BlockTreeNode`. If a node's children are dense, 
+it updates the node's `is_dense` flag accordingly.
+"""
+function merge_dense_matrices!(node::Union{Nothing, BlockTreeNode})
+    # Return if node is empty
+    if node === nothing
+        return
+    end
+
+    # Recursively process child nodes
+    if node.left !== nothing && node.right !== nothing
+        merge_dense_matrices!(node.left)
+        merge_dense_matrices!(node.right)
+        
+        # Set `is_dense` to true if both children are dense
+        node.is_dense = node.left.is_dense && node.right.is_dense
+    end
+end
+
+
+"""
+    traverse(block_tree::BlockTree)
+
+Traverses a `BlockTree` to categorize nodes as either `direct_list` for dense (direct) 
+interactions or `approx_list` for admissible (approximate) interactions.
+
+# Arguments
+- `block_tree::BlockTree`: The block tree to traverse.
+
+# Returns
+- `Tuple{Vector, Vector}`: Two vectors, `direct_list` and `approx_list`, containing tuples 
+  of target and source trees.
+"""
+function traverse(block_tree::BlockTree)
+    # Initialize lists for categorizing dense and admissible nodes
+    direct_list, approx_list = Vector{Tuple{ClusterNode, ClusterNode}}(), Vector{Tuple{ClusterNode, ClusterNode}}()
+    
+    # Recursive helper function to categorize nodes within the block tree based on density and admissibility.
+    function _traverse(node::BlockTreeNode, direct_list, approx_list)
+        # Categorize nodes as dense (direct interaction) or admissible (approximate interaction)
+        if node.is_admissible
+            push!(approx_list, (node.target_tree, node.source_tree))
+        elseif node.is_dense
+            push!(direct_list, (node.target_tree, node.source_tree))
+        end
+
+        # Recurse to left and right children if node is neither dense nor admissible
+        if !node.is_dense && !node.is_admissible
+            if node.left !== nothing
+                _traverse(node.left, direct_list, approx_list)
+            end
+            if node.right !== nothing
+                _traverse(node.right, direct_list, approx_list)
+            end
+        end
+    end
+
+    # Start the recursive traversal from the root of the block tree
+    _traverse(block_tree.root, direct_list, approx_list)
+    return direct_list, approx_list
+end
+
