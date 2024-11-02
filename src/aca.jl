@@ -42,7 +42,7 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows)
     # Calculate residual rows for row indices I
     function calc_residual_rows(I)
         residual = calc_rows(I)
-        for i in 1:length(left_vectors)
+        for i in eachindex(left_vectors)
             residual .-= left_vectors[i][I] * right_vectors[i]
         end
         return residual
@@ -51,7 +51,7 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows)
     # Calculate residual columns for column indices J
     function calc_residual_cols(J)
         residual = calc_cols(J)
-        for i in 1:length(right_vectors)
+        for i in eachindex(right_vectors)
             residual .-= left_vectors[i] * right_vectors[i][J]
         end
         return residual
@@ -67,7 +67,7 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows)
         abs_col_residual = abs.(residual_col)
 
         if k == 1
-            row_pivot, col_pivot = rand(1:n_rows), rand(1:n_cols)
+            row_pivot, col_pivot = 1, 1
         else
             col_pivot = argmax_not_in_list(abs_row_residual, used_col_pivots)
             row_pivot = argmax_not_in_list(abs_col_residual, used_row_pivots)

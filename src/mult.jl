@@ -2,7 +2,7 @@
 import Base: *
 
 # Optimized `mul!` function for in-place matrix-vector multiplication
-function mul!(result::Vector, hmatrix::HMatrix, x::Vector)
+function mul!(result::Vector, hmatrix::HMatrixCPU, x::Vector)
     fill!(result, 0)
 
     # Reorder x based on source index mapping to avoid repeated indexing in loops
@@ -17,9 +17,10 @@ function mul!(result::Vector, hmatrix::HMatrix, x::Vector)
     end
 
     # Process approximate (low-rank) blocks
-    for i in 1:length(hmatrix.approx_matrices)
+    for i in 1:length(hmatrix.U_matrices)
         (row_start, row_end, col_start, col_end) = hmatrix.approx_block_indices[i]
-        (U, V) = hmatrix.approx_matrices[i]
+        U = hmatrix.U_matrices[i]
+        V = hmatrix.V_matrices[i]
         
         result[row_start:row_end] .+= U * (V * view(x_ordered, col_start:col_end))
     end
@@ -30,7 +31,7 @@ function mul!(result::Vector, hmatrix::HMatrix, x::Vector)
 end
 
 # Overloaded `*` function for HMatrix and Vector
-function *(hmatrix::HMatrix, x::Vector)
+function *(hmatrix::HMatrixCPU, x::Vector)
     result = zeros(eltype(x), size(hmatrix.K, 1))
     mul!(result, hmatrix, x)
     return result

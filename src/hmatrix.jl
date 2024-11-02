@@ -1,7 +1,7 @@
 """
-    mutable struct HMatrix
+    mutable struct HMatrixCPU
 
-Hierarchical matrix structure used to store dense and low-rank approximated blocks of a matrix.
+Hierarchical matrix structure optimized for CPU-based operations, used for testing and validation.
 
 # Fields
 - `K::AbstractMatrix`: The matrix for which the hierarchical block structure is constructed.
@@ -10,16 +10,18 @@ Hierarchical matrix structure used to store dense and low-rank approximated bloc
 - `dense_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of dense blocks.
 - `approx_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of low-rank approximated blocks.
 - `dense_blocks::Vector{Matrix}`: Dense matrix blocks from direct interactions.
-- `approx_matrices::Vector{Tuple{Matrix, Matrix}}`: Low-rank (U, V) approximated matrices.
+- `U_matrices::AbstractArray`: Low-rank approximated U matrices.
+- `V_matrices::AbstractArray`: Low-rank approximated V matrices.
 """
-mutable struct HMatrix
+mutable struct HMatrixCPU
     K::AbstractMatrix                       # Original matrix for hierarchical decomposition
     target_index_map::Vector{Int}           # Index map for target reordering
     source_index_map::Vector{Int}           # Index map for source reordering
-    dense_block_indices::Vector{Tuple{Int,Int,Int,Int}}  # Dense block indices
-    approx_block_indices::Vector{Tuple{Int,Int,Int,Int}} # Low-rank block indices
+    dense_block_indices::Vector{Tuple{Int, Int, Int, Int}}  # Dense block indices
+    approx_block_indices::Vector{Tuple{Int, Int, Int, Int}} # Low-rank block indices
     dense_blocks::Vector{Matrix}            # Dense interaction blocks
-    approx_matrices::Vector{Tuple{Matrix,Matrix}}  # Low-rank (U, V) matrices
+    U_matrices::Vector{Matrix}              # Low-rank U matrices
+    V_matrices::Vector{Matrix}              # Low-rank V matrices
 end
 
 """
@@ -43,15 +45,15 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
 
     dense_blocks, approx_blocks = traverse(block_tree)
 
-    dense_matrices, approx_matrices, dense_block_indices, approx_block_indices = build_matrices(K,
+    dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices = build_matrices(K,
                                                                                                 block_tree.target_index_map,
                                                                                                 block_tree.source_index_map,
                                                                                                 dense_blocks,
                                                                                                 approx_blocks;
                                                                                                 eps=eps)
 
-    return HMatrix(K, X.index_map, Y.index_map, dense_block_indices, approx_block_indices,
-                   dense_matrices, approx_matrices)
+    return HMatrixCPU(K, X.index_map, Y.index_map, dense_block_indices, approx_block_indices,
+                   dense_matrices, U_matrices, V_matrices)
 end
 
 """
@@ -78,7 +80,8 @@ function build_matrices(K::AbstractMatrix, target_index_map::Vector{Int},
                         source_index_map::Vector{Int}, dense_blocks::Vector,
                         approx_blocks::Vector; eps=1e-5)
     dense_matrices = Matrix[]  # Dense blocks
-    approx_matrices = Vector{Tuple{Matrix,Matrix}}()  # Low-rank (U, V) approximation pairs
+    U_matrices = Matrix[]  # Low-rank U matrices
+    V_matrices = Matrix[]  # Low-rank V matrices
     dense_block_indices = Vector{Tuple{Int,Int,Int,Int}}()
     approx_block_indices = Vector{Tuple{Int,Int,Int,Int}}()
 
@@ -102,10 +105,10 @@ function build_matrices(K::AbstractMatrix, target_index_map::Vector{Int},
         Uc, Vc = SVD_recompress(U, V, eps)
 
         # Check if approximation is beneficial, otherwise store as dense block
-        if size(Uc, 1) * size(Uc, 2) + size(Vc, 1) * size(Vc, 2) <
-           length(target_ids) * length(source_ids)
-            push!(approx_matrices, (Uc, Vc))
-            push!(approx_block_indices,
+        if size(Uc, 1) * size(Uc, 2) + size(Vc, 1) * size(Vc, 2) < length(target_ids) * length(source_ids)
+           push!(U_matrices, Uc)
+           push!(V_matrices, Vc)
+           push!(approx_block_indices,
                   (a.start_idx, a.end_idx - 1, b.start_idx, b.end_idx - 1))
         else
             dense_block = K[target_ids, source_ids]
@@ -115,7 +118,7 @@ function build_matrices(K::AbstractMatrix, target_index_map::Vector{Int},
         end
     end
 
-    return dense_matrices, approx_matrices, dense_block_indices, approx_block_indices
+    return dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices
 end
 
 """
@@ -130,18 +133,18 @@ and the compression ratio.
 # Output
 Returns a dictionary with information about the hierarchical matrix.
 """
-function info(hmatrix::HMatrix)
+function info(hmatrix::HMatrixCPU)
     # Basic matrix information
     n_rows, n_cols = size(hmatrix.K)
     data_type = eltype(hmatrix.K)
 
     # Tree statistics
     num_dense_leaves = length(hmatrix.dense_blocks)
-    num_approx_leaves = length(hmatrix.approx_matrices)
+    num_approx_leaves = length(hmatrix.U_matrices)
     num_leaves = num_dense_leaves + num_approx_leaves
 
     # Sparse block rank statistics
-    ranks = [size(U, 2) for (U, _) in hmatrix.approx_matrices]
+    ranks = [size(U, 2) for U in hmatrix.U_matrices]
     min_rank = minimum(ranks)
     max_rank = maximum(ranks)
 
@@ -151,12 +154,12 @@ function info(hmatrix::HMatrix)
     max_dense_size = maximum(dense_sizes)
 
     # Leaf size statistics (number of elements per leaf)
-    approx_sizes = [size(U, 1) * size(U, 2) + size(V, 1) * size(V, 2)
-                    for (U, V) in hmatrix.approx_matrices]
+    U_sizes = [size(U, 1) * size(U, 2) for U in hmatrix.U_matrices]
+    V_sizes = [size(V, 1) * size(V, 2) for V in hmatrix.V_matrices]
 
     # Compression ratio calculation
     original_size = n_rows * n_cols
-    compressed_size = sum(approx_sizes) + sum(dense_sizes)
+    compressed_size = sum(U_sizes) + sum(V_sizes)+ sum(dense_sizes)
     compression_ratio = original_size / compressed_size
 
     # Return dictionary of information

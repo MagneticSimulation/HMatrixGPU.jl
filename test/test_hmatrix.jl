@@ -34,10 +34,13 @@ for M in hmatrix.dense_blocks
     @test !any(isnan, M)
 end
 
-for (U,V) in hmatrix.approx_matrices
-    @test !any(isnan, U) && !any(isnan, V)
+for U in hmatrix.U_matrices
+    @test !any(isnan, U)
+end
+
+for V in hmatrix.V_matrices
+    @test !any(isnan, V)
 end
 
 x = rand(N)
-
 @test isapprox(K * x, hmatrix * x; atol=1e-5)

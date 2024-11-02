@@ -11,10 +11,8 @@ include("mult.jl")
 
 export ClusterTree, BlockTree, ACA_plus, HMatrix, info
 
-
 const default_backend = Backend[CPU()]
 const all_backends = Backend[CPU(), CPU(), CPU(), CPU()]
-
 
 export set_backend
 """
@@ -82,5 +80,21 @@ function set_backend(backend="cuda")
     return true
 end
 
+function kernel_array(a::Array)
+    if default_backend[] == CPU()
+        return a
+    end
+    A = KernelAbstractions.zeros(default_backend[], eltype(a), size(a))
+    copyto!(A, a)
+    return A
+end
+
+function create_zeros(::Type{T}, dims...) where {T}
+    return KernelAbstractions.zeros(default_backend[], T, dims)
+end
+
+function create_ones(::Type{T}, dims...) where {T}
+    return KernelAbstractions.ones(default_backend[], T, dims)
+end
 
 end
