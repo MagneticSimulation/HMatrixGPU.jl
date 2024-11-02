@@ -1,7 +1,7 @@
 """
     mutable struct HMatrixCPU
 
-Hierarchical matrix structure optimized for CPU-based operations, used for testing and validation.
+Hierarchical matrix used for testing and validation.
 
 # Fields
 - `K::AbstractMatrix`: The matrix for which the hierarchical block structure is constructed.
@@ -10,8 +10,8 @@ Hierarchical matrix structure optimized for CPU-based operations, used for testi
 - `dense_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of dense blocks.
 - `approx_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of low-rank approximated blocks.
 - `dense_blocks::Vector{Matrix}`: Dense matrix blocks from direct interactions.
-- `U_matrices::AbstractArray`: Low-rank approximated U matrices.
-- `V_matrices::AbstractArray`: Low-rank approximated V matrices.
+- `U_matrices::Vector{Matrix}`: Low-rank approximated U matrices.
+- `V_matrices::Vector{Matrix}`: Low-rank approximated V matrices.
 """
 mutable struct HMatrixCPU
     K::AbstractMatrix                       # Original matrix for hierarchical decomposition
@@ -25,7 +25,37 @@ mutable struct HMatrixCPU
 end
 
 """
-    HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5)
+    mutable struct HMatrix
+
+Hierarchical matrix structure optimized for GPU-based operations, designed for better parallel performance.
+
+# Fields
+- `K::AbstractMatrix`: The matrix for which the hierarchical block structure is constructed.
+- `target_index_map::AbstractArray{Int}`: Index map for target reordering.
+- `source_index_map::AbstractArray{Int}`: Index map for source reordering.
+- `dense_block_indices::AbstractArray{Int, 2}`: Dense block indices in a matrix format.
+- `U_block_indices::AbstractArray{Int, 2}`: Indices for U-matrix blocks.
+- `V_block_indices::AbstractArray{Int, 2}`: Indices for V-matrix blocks.
+- `dense_blocks::AbstractArray{T, 1}`: Dense interaction blocks.
+- `U_matrices::AbstractArray{T, 1}`: Low-rank U matrices.
+- `V_matrices::AbstractArray{T, 1}`: Low-rank V matrices.
+- `Vx_buffer::AbstractArray{T, 1}`: Buffer to store intermediate V*x results.
+"""
+mutable struct HMatrix{T<:AbstractFloat}
+    K::AbstractMatrix{T}
+    target_index_map::AbstractArray{Int}
+    source_index_map::AbstractArray{Int}
+    dense_block_indices::AbstractArray{Int, 2}
+    U_block_indices::AbstractArray{Int, 2}
+    V_block_indices::AbstractArray{Int, 2}
+    dense_blocks::AbstractArray{T, 1}
+    U_matrices::AbstractArray{T, 1}
+    V_matrices::AbstractArray{T, 1}
+    Vx_buffer::AbstractArray{T, 1}
+end
+
+"""
+    HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5, flatten=true)
 
 Creates a hierarchical matrix (`HMatrix`) from a given matrix `K` and two cluster trees `X` and `Y`.
 
@@ -35,26 +65,76 @@ Creates a hierarchical matrix (`HMatrix`) from a given matrix `K` and two cluste
 - `Y::ClusterTree`: Cluster tree representing the source partitioning.
 - `eta::Float64`: Admissibility parameter controlling the low-rank approximation.
 - `eps::Float64`: Tolerance level for approximation error.
-
-# Returns
-- `HMatrix`: The constructed hierarchical matrix with dense and approximated blocks.
+- `flatten::Bool`: Flag to indicate if the matrix should be optimized for GPU operations.
 """
-function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5)
+function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5, flatten=true)
     block_tree = BlockTree(X, Y; eta=eta)
     merge_dense_matrices!(block_tree.root)
 
+    # Traverse the block tree to gather dense and approximated blocks
     dense_blocks, approx_blocks = traverse(block_tree)
 
-    dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices = build_matrices(K,
-                                                                                                block_tree.target_index_map,
-                                                                                                block_tree.source_index_map,
-                                                                                                dense_blocks,
-                                                                                                approx_blocks;
-                                                                                                eps=eps)
+    # Build the block matrices and indices
+    dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices = build_matrices(
+        K, block_tree.target_index_map, block_tree.source_index_map, dense_blocks, approx_blocks; eps=eps
+    )
 
-    return HMatrixCPU(K, X.index_map, Y.index_map, dense_block_indices, approx_block_indices,
-                   dense_matrices, U_matrices, V_matrices)
+    # Return CPU-based structure if flatten is false
+    if !flatten
+        return HMatrixCPU(
+            K, X.index_map, Y.index_map, dense_block_indices, approx_block_indices,
+            dense_matrices, U_matrices, V_matrices
+        )
+    end
+
+    # Flatten matrices for GPU optimization, using row-major.
+    dense_data = vcat([vec(D') for D in dense_matrices]...)
+    U_data = vcat([vec(U') for U in U_matrices]...)
+    V_data = vcat([vec(V') for V in V_matrices]...)
+
+    # Construct dense block indices
+    dense_indices = hcat([collect(t) for t in dense_block_indices]...)
+    dense_offsets = [0; cumsum([prod(size(M)) for M in dense_matrices[1:end-1]])]
+    dense_indices = vcat(dense_indices, dense_offsets')
+    dense_indices = kernel_array(dense_indices)
+
+    # Construct U block indices
+    U_indices = hcat([collect(t) for t in approx_block_indices]...)
+    U_offsets = [0; cumsum([prod(size(U)) for U in U_matrices[1:end-1]])]
+    U_indices = vcat(U_indices, U_offsets')
+
+    # Construct V block indices and adjust U block indices for V matrix rows
+    V_indices = []
+    V_offset = 0
+    U_offset_row = 0
+    for i in eachindex(V_matrices)
+        r, n = size(V_matrices[i])
+        block_data = zeros(Int64, (3, r))
+        (_, _, col_start, col_end) = approx_block_indices[i]
+        for j in 1:r
+            block_data[1, j] = col_start
+            block_data[2, j] = col_end
+            block_data[3, j] = V_offset
+            V_offset += n
+        end
+        push!(V_indices, block_data)
+        # Update U indices for row limits
+        U_indices[3, i] = U_offset_row + 1
+        U_indices[4, i] = U_offset_row + r
+        U_offset_row += r
+    end
+
+    U_indices = kernel_array(U_indices)
+    V_indices = kernel_array(hcat(V_indices...))
+    Vx_buffer = create_zeros(eltype(K), size(V_indices, 2))
+
+    return HMatrix(
+        K, kernel_array(X.index_map), kernel_array(Y.index_map),
+        dense_indices, U_indices, V_indices,
+        kernel_array(dense_data), kernel_array(U_data), kernel_array(V_data), Vx_buffer
+    )
 end
+
 
 """
     build_matrices(K::AbstractMatrix, target_index_map::Vector{Int}, source_index_map::Vector{Int}, 
