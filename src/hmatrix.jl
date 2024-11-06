@@ -179,11 +179,13 @@ function build_matrices(K::AbstractMatrix, target_index_map::Vector{Int},
         target_ids = view(target_index_map, (a.start_idx):(a.end_idx - 1))
         source_ids = view(source_index_map, (b.start_idx):(b.end_idx - 1))
 
-        U, V = ACA_plus(length(target_ids), length(source_ids),
+        Uc, Vc = ACA_plus(length(target_ids), length(source_ids),
                         I -> K[target_ids[I], source_ids],
                         J -> K[target_ids, source_ids[J]], eps / 10.0)
-        Uc, Vc = SVD_recompress(U, V, eps)
-
+        if isa(Uc, Matrix) && isa(Vc, Matrix)
+            Uc, Vc = SVD_recompress(Uc, Vc, eps)
+        end
+        
         # Check if approximation is beneficial, otherwise store as dense block
         if size(Uc, 1) * size(Uc, 2) + size(Vc, 1) * size(Vc, 2) < length(target_ids) * length(source_ids)
            push!(U_matrices, Uc)
