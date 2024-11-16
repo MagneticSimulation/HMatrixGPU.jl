@@ -14,6 +14,12 @@ export ClusterTree, BlockTree, ACA_plus, HMatrix, info
 const default_backend = Backend[CPU()]
 const all_backends = Backend[CPU(), CPU(), CPU(), CPU()]
 
+const groupsize = Ref(128)
+function set_groupsize(x)
+    return groupsize[] = x
+end
+export set_groupsize
+
 export set_backend
 """
     set_backend(backend="cuda")
