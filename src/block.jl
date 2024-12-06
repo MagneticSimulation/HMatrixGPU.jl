@@ -1,8 +1,5 @@
 # Structure defining a node within the block tree, representing a block in the hierarchical matrix
 mutable struct BlockTreeNode
-    D::Union{Nothing,Matrix{Float64}}      # Dense matrix if this node is dense
-    U::Union{Nothing,Matrix{Float64}}      # U matrix for low-rank approximation (RkMatrix)
-    V::Union{Nothing,Matrix{Float64}}      # V matrix for low-rank approximation (RkMatrix)
     target_tree::Union{Nothing,ClusterNode}  # Target cluster node (from target tree)
     source_tree::Union{Nothing,ClusterNode}  # Source cluster node (from source tree)
     is_admissible::Bool                     # Indicates if node is admissible (approximable by low-rank)
@@ -33,8 +30,7 @@ and can be represented by a low-rank approximation.
 """
 function BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5)
     # Initialize the root node with the target and source cluster roots
-    root = BlockTreeNode(nothing, nothing, nothing, X.root, Y.root, false, false, nothing,
-                         nothing)
+    root = BlockTreeNode(X.root, Y.root, false, false, nothing, nothing)
 
     # Recursively build the block tree
     build_block_tree!(root, eta)
@@ -76,15 +72,11 @@ function build_block_tree!(node::BlockTreeNode, eta)
 
         # Create child nodes by splitting target or source cluster as determined
         if split_Y
-            node.left = BlockTreeNode(nothing, nothing, nothing, X, Y.left, false, false,
-                                      nothing, nothing)
-            node.right = BlockTreeNode(nothing, nothing, nothing, X, Y.right, false, false,
-                                       nothing, nothing)
+            node.left = BlockTreeNode(X, Y.left, false, false, nothing, nothing)
+            node.right = BlockTreeNode(X, Y.right, false, false, nothing, nothing)
         else
-            node.left = BlockTreeNode(nothing, nothing, nothing, X.left, Y, false, false,
-                                      nothing, nothing)
-            node.right = BlockTreeNode(nothing, nothing, nothing, X.right, Y, false, false,
-                                       nothing, nothing)
+            node.left = BlockTreeNode(X.left, Y, false, false, nothing, nothing)
+            node.right = BlockTreeNode(X.right, Y, false, false, nothing, nothing)
         end
 
         # Recursively build the left and right subtrees

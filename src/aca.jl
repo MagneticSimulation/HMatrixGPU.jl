@@ -133,7 +133,7 @@ function SVD_recompress(U::Matrix, V::Matrix, eps::Float64)
 
     # Find the truncation rank where the cumulative Frobenius norm falls below eps
     rank_trunc = findfirst(x -> x < eps, frobenius_norms)
-    rank_trunc = rank_trunc == nothing ? size(U, 2) : rank_trunc - 1  # Use the full rank if no truncation is needed
+    rank_trunc = rank_trunc === nothing ? size(U, 2) : rank_trunc - 1  # Use the full rank if no truncation is needed
 
     # Compute the recompressed matrices U_SVD and V_SVD up to the truncated rank
     U_SVD = QU * (W[:, 1:rank_trunc] .* SIG[1:rank_trunc]')

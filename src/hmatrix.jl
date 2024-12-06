@@ -17,8 +17,8 @@ mutable struct HMatrixCPU
     K::AbstractMatrix                       # Original matrix for hierarchical decomposition
     target_index_map::Vector{Int}           # Index map for target reordering
     source_index_map::Vector{Int}           # Index map for source reordering
-    dense_block_indices::Vector{Tuple{Int, Int, Int, Int}}  # Dense block indices
-    approx_block_indices::Vector{Tuple{Int, Int, Int, Int}} # Low-rank block indices
+    dense_block_indices::Vector{Tuple{Int,Int,Int,Int}}  # Dense block indices
+    approx_block_indices::Vector{Tuple{Int,Int,Int,Int}} # Low-rank block indices
     dense_blocks::Vector{Matrix}            # Dense interaction blocks
     U_matrices::Vector{Matrix}              # Low-rank U matrices
     V_matrices::Vector{Matrix}              # Low-rank V matrices
@@ -45,13 +45,13 @@ mutable struct HMatrix{T<:AbstractFloat}
     K::AbstractMatrix{T}
     target_index_map::AbstractArray{Int}
     source_index_map::AbstractArray{Int}
-    dense_block_indices::AbstractArray{Int, 2}
-    U_block_indices::AbstractArray{Int, 2}
-    V_block_indices::AbstractArray{Int, 2}
-    dense_blocks::AbstractArray{T, 1}
-    U_matrices::AbstractArray{T, 1}
-    V_matrices::AbstractArray{T, 1}
-    Vx_buffer::AbstractArray{T, 1}
+    dense_block_indices::AbstractArray{Int,2}
+    U_block_indices::AbstractArray{Int,2}
+    V_block_indices::AbstractArray{Int,2}
+    dense_blocks::AbstractArray{T,1}
+    U_matrices::AbstractArray{T,1}
+    V_matrices::AbstractArray{T,1}
+    Vx_buffer::AbstractArray{T,1}
 end
 
 """
@@ -67,7 +67,8 @@ Creates a hierarchical matrix (`HMatrix`) from a given matrix `K` and two cluste
 - `eps::Float64`: Tolerance level for approximation error.
 - `flatten::Bool`: Flag to indicate if the matrix should be optimized for GPU operations.
 """
-function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5, flatten=true)
+function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
+                 flatten=true)
     block_tree = BlockTree(X, Y; eta=eta)
     merge_dense_matrices!(block_tree.root)
 
@@ -75,16 +76,17 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
     dense_blocks, approx_blocks = traverse(block_tree)
 
     # Build the block matrices and indices
-    dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices = build_matrices(
-        K, block_tree.target_index_map, block_tree.source_index_map, dense_blocks, approx_blocks; eps=eps
-    )
+    dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices = build_matrices(K,
+                                                                                                       block_tree.target_index_map,
+                                                                                                       block_tree.source_index_map,
+                                                                                                       dense_blocks,
+                                                                                                       approx_blocks;
+                                                                                                       eps=eps)
 
     # Return CPU-based structure if flatten is false
     if !flatten
-        return HMatrixCPU(
-            K, X.index_map, Y.index_map, dense_block_indices, approx_block_indices,
-            dense_matrices, U_matrices, V_matrices
-        )
+        return HMatrixCPU(K, X.index_map, Y.index_map, dense_block_indices,
+                          approx_block_indices, dense_matrices, U_matrices, V_matrices)
     end
 
     # Flatten matrices for GPU optimization, using row-major.
@@ -94,13 +96,13 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
 
     # Construct dense block indices
     dense_indices = hcat([collect(t) for t in dense_block_indices]...)
-    dense_offsets = [0; cumsum([prod(size(M)) for M in dense_matrices[1:end-1]])]
+    dense_offsets = [0; cumsum([prod(size(M)) for M in dense_matrices[1:(end - 1)]])]
     dense_indices = vcat(dense_indices, dense_offsets')
     dense_indices = kernel_array(dense_indices)
 
     # Construct U block indices
     U_indices = hcat([collect(t) for t in approx_block_indices]...)
-    U_offsets = [0; cumsum([prod(size(U)) for U in U_matrices[1:end-1]])]
+    U_offsets = [0; cumsum([prod(size(U)) for U in U_matrices[1:(end - 1)]])]
     U_indices = vcat(U_indices, U_offsets')
 
     # Construct V block indices and adjust U block indices for V matrix rows
@@ -128,13 +130,10 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
     V_indices = kernel_array(hcat(V_indices...))
     Vx_buffer = create_zeros(eltype(K), size(V_indices, 2))
 
-    return HMatrix(
-        K, kernel_array(X.index_map), kernel_array(Y.index_map),
-        dense_indices, U_indices, V_indices,
-        kernel_array(dense_data), kernel_array(U_data), kernel_array(V_data), Vx_buffer
-    )
+    return HMatrix(K, kernel_array(X.index_map), kernel_array(Y.index_map), dense_indices,
+                   U_indices, V_indices, kernel_array(dense_data), kernel_array(U_data),
+                   kernel_array(V_data), Vx_buffer)
 end
-
 
 """
     build_matrices(K::AbstractMatrix, target_index_map::Vector{Int}, source_index_map::Vector{Int}, 
@@ -180,17 +179,18 @@ function build_matrices(K::AbstractMatrix, target_index_map::Vector{Int},
         source_ids = view(source_index_map, (b.start_idx):(b.end_idx - 1))
 
         Uc, Vc = ACA_plus(length(target_ids), length(source_ids),
-                        I -> K[target_ids[I], source_ids],
-                        J -> K[target_ids, source_ids[J]], eps / 10.0)
+                          I -> K[target_ids[I], source_ids],
+                          J -> K[target_ids, source_ids[J]], eps / 10.0)
         if isa(Uc, Matrix) && isa(Vc, Matrix)
             Uc, Vc = SVD_recompress(Uc, Vc, eps)
         end
-        
+
         # Check if approximation is beneficial, otherwise store as dense block
-        if size(Uc, 1) * size(Uc, 2) + size(Vc, 1) * size(Vc, 2) < length(target_ids) * length(source_ids)
-           push!(U_matrices, Uc)
-           push!(V_matrices, Vc)
-           push!(approx_block_indices,
+        if size(Uc, 1) * size(Uc, 2) + size(Vc, 1) * size(Vc, 2) <
+           length(target_ids) * length(source_ids)
+            push!(U_matrices, Uc)
+            push!(V_matrices, Vc)
+            push!(approx_block_indices,
                   (a.start_idx, a.end_idx - 1, b.start_idx, b.end_idx - 1))
         else
             dense_block = K[target_ids, source_ids]
@@ -241,7 +241,7 @@ function info(hmatrix::HMatrixCPU)
 
     # Compression ratio calculation
     original_size = n_rows * n_cols
-    compressed_size = sum(U_sizes) + sum(V_sizes)+ sum(dense_sizes)
+    compressed_size = sum(U_sizes) + sum(V_sizes) + sum(dense_sizes)
     compression_ratio = original_size / compressed_size
 
     # Return dictionary of information

@@ -1,5 +1,6 @@
 
 import Base: *
+import LinearAlgebra: mul!
 
 # Optimized `mul!` function for in-place matrix-vector multiplication
 function mul!(result::Vector, hmatrix::HMatrixCPU, x::Vector)
@@ -170,7 +171,7 @@ function mul!(result::AbstractArray{T}, hmatrix::HMatrix{T}, x::AbstractArray{T}
             hmatrix.source_index_map,          # Source index mapping
             x;                                 # Input vector
             ndrange=16 * length(hmatrix.Vx_buffer))
-    
+
     # Launch kernel for dense and U-matrix multiplications
     kernel! = DU_mult_vec_kernel!(backend, groupsize[])
     kernel!(result,                            # Output array for final result

@@ -43,7 +43,10 @@ for V in hmatrix.V_matrices
 end
 
 x = rand(N)
+y = rand(N)
+mul!(y, hmatrix, x)
 @test isapprox(K * x, hmatrix * x; atol=1e-5)
+@test isapprox(K * x, y; atol=1e-5)
 
 h_flatten = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
 
