@@ -59,8 +59,8 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows)
 
     max_iter = min(n_rows, n_cols, max_iter)
 
-    residual_row = zeros(n_cols)  # Placeholder for residual row calculation
-    residual_col = zeros(n_rows)  # Placeholder for residual column calculation
+    residual_row = zeros(Float64, n_cols)  # Placeholder for residual row calculation
+    residual_col = zeros(Float64, n_rows)  # Placeholder for residual column calculation
 
     for k in 1:max_iter
         abs_row_residual = abs.(residual_row)

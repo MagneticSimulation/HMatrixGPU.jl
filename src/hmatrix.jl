@@ -68,8 +68,8 @@ Creates a hierarchical matrix (`HMatrix`) from a given matrix `K` and two cluste
 - `flatten::Bool`: Flag to indicate if the matrix should be optimized for GPU operations.
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
-                 flatten=true)
-    block_tree = BlockTree(X, Y; eta=eta)
+                 flatten=true, index_map_using_cpu=true)
+    block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
     merge_dense_matrices!(block_tree.root)
 
     # Traverse the block tree to gather dense and approximated blocks
@@ -155,8 +155,8 @@ Builds dense and low-rank approximated matrices from `K` based on block structur
 - `dense_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of dense blocks.
 - `approx_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of approximated blocks.
 """
-function build_matrices(K::AbstractMatrix, target_index_map::Vector{Int},
-                        source_index_map::Vector{Int}, dense_blocks::Vector,
+function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
+                        source_index_map::AbstractArray{Int}, dense_blocks::Vector,
                         approx_blocks::Vector; eps=1e-5)
     dense_matrices = Matrix[]  # Dense blocks
     U_matrices = Matrix[]  # Low-rank U matrices
@@ -177,10 +177,11 @@ function build_matrices(K::AbstractMatrix, target_index_map::Vector{Int},
     for (a, b) in approx_blocks
         target_ids = view(target_index_map, (a.start_idx):(a.end_idx - 1))
         source_ids = view(source_index_map, (b.start_idx):(b.end_idx - 1))
-
+        target_ids_cpu = collect(target_ids)
+        source_ids_cpu = collect(source_ids)
         Uc, Vc = ACA_plus(length(target_ids), length(source_ids),
-                          I -> K[target_ids[I], source_ids],
-                          J -> K[target_ids, source_ids[J]], eps / 10.0)
+                          I -> K[target_ids_cpu[I], source_ids],
+                          J -> K[target_ids, source_ids_cpu[J]], eps / 10.0)
         if isa(Uc, Matrix) && isa(Vc, Matrix)
             Uc, Vc = SVD_recompress(Uc, Vc, eps)
         end

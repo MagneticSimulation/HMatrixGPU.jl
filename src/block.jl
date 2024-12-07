@@ -10,8 +10,8 @@ end
 
 # Structure representing the entire block tree for hierarchical matrices
 struct BlockTree
-    target_index_map::Vector{Int}           # Mapping of target indices for reordering
-    source_index_map::Vector{Int}           # Mapping of source indices for reordering
+    target_index_map::AbstractArray{Int}           # Mapping of target indices for reordering
+    source_index_map::AbstractArray{Int}           # Mapping of source indices for reordering
     root::BlockTreeNode                     # Root node of the block tree
 end
 
@@ -28,15 +28,19 @@ and can be represented by a low-rank approximation.
 - `eta`: Threshold parameter controlling the admissibility condition.
 
 """
-function BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5)
+function BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5, index_map_using_cpu=true)
     # Initialize the root node with the target and source cluster roots
     root = BlockTreeNode(X.root, Y.root, false, false, nothing, nothing)
 
     # Recursively build the block tree
     build_block_tree!(root, eta)
 
+    if index_map_using_cpu
+        return BlockTree(X.index_map, Y.index_map, root)
+    end
+
     # Return the constructed BlockTree with target and source index mappings
-    return BlockTree(X.index_map, Y.index_map, root)
+    return BlockTree(kernel_array(X.index_map), kernel_array(Y.index_map), root)
 end
 
 """
