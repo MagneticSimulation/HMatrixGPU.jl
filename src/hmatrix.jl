@@ -68,7 +68,7 @@ Creates a hierarchical matrix (`HMatrix`) from a given matrix `K` and two cluste
 - `flatten::Bool`: Flag to indicate if the matrix should be optimized for GPU operations.
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
-                 flatten=true, index_map_using_cpu=true)
+                 flatten=true, index_map_using_cpu=true, svd_recompress = true)
     block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
     merge_dense_matrices!(block_tree.root)
 
@@ -81,7 +81,8 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                                                                                                        block_tree.source_index_map,
                                                                                                        dense_blocks,
                                                                                                        approx_blocks;
-                                                                                                       eps=eps)
+                                                                                                       eps=eps,
+                                                                                                       svd_recompress = svd_recompress)
 
     # Return CPU-based structure if flatten is false
     if !flatten
@@ -126,9 +127,18 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
         U_offset_row += r
     end
 
-    U_indices = kernel_array(U_indices)
-    V_indices = kernel_array(hcat(V_indices...))
-    Vx_buffer = create_zeros(eltype(K), size(V_indices, 2))
+    if length(V_matrices) > 0
+        U_indices = kernel_array(U_indices)
+        V_indices = kernel_array(hcat(V_indices...))
+        Vx_buffer = create_zeros(eltype(K), size(V_indices, 2))
+    else
+        # FIXME: We need to handle the case where there are no approximated blocks
+        U_indices = kernel_array(zeros(Int64, 0, 0))
+        V_indices = kernel_array(zeros(Int64,0,0))
+        Vx_buffer = create_zeros(eltype(K), 0)
+        U_data = zeros(0)
+        V_data = zeros(0)
+    end
 
     return HMatrix(K, kernel_array(X.index_map), kernel_array(Y.index_map), dense_indices,
                    U_indices, V_indices, kernel_array(dense_data), kernel_array(U_data),
@@ -157,7 +167,7 @@ Builds dense and low-rank approximated matrices from `K` based on block structur
 """
 function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
                         source_index_map::AbstractArray{Int}, dense_blocks::Vector,
-                        approx_blocks::Vector; eps=1e-5)
+                        approx_blocks::Vector; eps=1e-5, svd_recompress = true)
     dense_matrices = Matrix[]  # Dense blocks
     U_matrices = Matrix[]  # Low-rank U matrices
     V_matrices = Matrix[]  # Low-rank V matrices
@@ -182,7 +192,7 @@ function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
         Uc, Vc = ACA_plus(length(target_ids), length(source_ids),
                           I -> K[target_ids_cpu[I], source_ids],
                           J -> K[target_ids, source_ids_cpu[J]], eps / 10.0)
-        if isa(Uc, Matrix) && isa(Vc, Matrix)
+        if isa(Uc, Matrix) && isa(Vc, Matrix) && svd_recompress
             Uc, Vc = SVD_recompress(Uc, Vc, eps)
         end
 
@@ -228,8 +238,13 @@ function info(hmatrix::HMatrixCPU)
 
     # Sparse block rank statistics
     ranks = [size(U, 2) for U in hmatrix.U_matrices]
-    min_rank = minimum(ranks)
-    max_rank = maximum(ranks)
+    if length(ranks) == 0
+        min_rank = 0
+        max_rank = 0
+    else
+        min_rank = minimum(ranks)
+        max_rank = maximum(ranks)
+    end
 
     # Dense block size statistics
     dense_sizes = [length(block) for block in hmatrix.dense_blocks]
