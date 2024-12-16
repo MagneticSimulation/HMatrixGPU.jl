@@ -14,7 +14,7 @@ export ClusterTree, BlockTree, ACA_plus, HMatrix, info
 const default_backend = Backend[CPU()]
 const all_backends = Backend[CPU(), CPU(), CPU(), CPU()]
 
-const groupsize = Ref(128)
+const groupsize = Ref(512)
 function set_groupsize(x)
     return groupsize[] = x
 end
@@ -82,8 +82,30 @@ function set_backend(backend="cuda")
         default_backend[] = CPU()
     end
 
-    @info(@sprintf("Switch the backend to %s", default_backend[]))
+    @info(@sprintf("Switch the backend of HMatrixGPU to %s", default_backend[]))
     return true
+end
+
+export @using_gpu
+macro using_gpu()
+    quote
+        try
+            using CUDA
+        catch
+        end
+        try
+            using AMDGPU
+        catch
+        end
+        try
+            using oneAPI
+        catch
+        end
+        try
+            using Metal
+        catch
+        end
+    end
 end
 
 function kernel_array(a::Array)
