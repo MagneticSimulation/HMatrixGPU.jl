@@ -4,6 +4,7 @@ using HMatrixGPU
 using Test
 Random.seed!(10)
 
+set_backend("cpu")
 N = 1000;
 
 X = [[sin(i * 2π / N), cos(i * 2π / N), 0] for i in 1:N]
@@ -102,6 +103,10 @@ a1 = dense_multiply(hmatrix, x)
 b1 = dense_multiply(h_flatten, x)
 @test isapprox(a1, b1; atol=1e-12)
 
+S = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster, eta=1.5)
+c = S*x
+@test isapprox(a1, c; atol=1e-12)
+
 function V_multiply(hmatrix::HMatrixGPU.HMatrixCPU, x::Vector)
     result = zeros(eltype(hmatrix.K), size(hmatrix.K, 1))
 
@@ -152,7 +157,8 @@ vx = V_multiply(h_flatten, x)
 # we need to wait the issue to be fixed https://github.com/JuliaGPU/KernelAbstractions.jl/issues/544
 #@test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)
 
-using CUDA
+@using_gpu()
+set_backend("cuda")
 if CUDA.functional()
     h_flatten = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
     @test isapprox(hmatrix * x, Array(h_flatten * CuArray(x)); atol=1e-9)

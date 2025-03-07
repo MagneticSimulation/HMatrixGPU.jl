@@ -1,3 +1,5 @@
+using SparseArrays
+
 """
     mutable struct HMatrixCPU
 
@@ -214,6 +216,64 @@ function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
     return dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices
 end
 
+
+"""
+    sparsify_hmatrix(K, X, Y; eta=1.5)
+
+Convert dense blocks of an H-matrix to a sparse matrix representation for efficient storage and computation.
+
+# Arguments
+- `K::AbstractMatrix`: Original dense matrix to be sparsified.
+- `X::ClusterTree`: Cluster tree defining row partitioning.
+- `Y::ClusterTree`: Cluster tree defining column partitioning.
+- `eta::Float64=1.5`: Admissibility parameter for block clustering (controls block tree structure).
+
+# Returns
+- `SparseMatrixCSC`: Sparse matrix containing all dense blocks from the H-matrix structure.
+"""
+function sparsify_hmatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, index_map_using_cpu=true)
+    
+    block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
+    merge_dense_matrices!(block_tree.root)
+
+    dense_blocks, _ = traverse(block_tree)
+
+    target_index_map = block_tree.target_index_map
+    source_index_map = block_tree.source_index_map
+
+    # Initialize row indices, column indices, and non-zero values for the sparse matrix
+    I = Int[]  # Row indices
+    J = Int[]  # Column indices
+    V = Float64[]  # Non-zero values
+
+    # Iterate over dense blocks and directly populate the sparse matrix
+    for (a, b) in dense_blocks
+        # Get the index ranges for the target and source blocks
+        target_ids = view(target_index_map, (a.start_idx):(a.end_idx - 1))
+        source_ids = view(source_index_map, (b.start_idx):(b.end_idx - 1))
+
+        # Extract the dense block
+        dense_block = K[target_ids, source_ids]
+
+        # Add non-zero elements of the dense block to the sparse matrix indices and values
+        for (i, row) in enumerate(Array(target_ids))
+            for (j, col) in enumerate(Array(source_ids))
+                push!(I, row)
+                push!(J, col)
+                push!(V, dense_block[i, j])
+            end
+        end
+    end
+
+    # Construct the sparse matrix
+    n_rows = size(K, 1)
+    n_cols = size(K, 2)
+    sparse_matrix = sparse(I, J, V, n_rows, n_cols)
+
+    return sparse_matrix
+end
+
+
 """
     info(hmatrix::HMatrix) -> Dict
 
@@ -268,3 +328,4 @@ function info(hmatrix::HMatrixCPU)
                 "max_dense_size" => max_dense_size,
                 "compression_ratio" => compression_ratio)
 end
+
