@@ -2,7 +2,12 @@
 import Base: *
 import LinearAlgebra: mul!
 
-# Optimized `mul!` function for in-place matrix-vector multiplication
+"""
+    mul!(result::Vector, hmatrix::HMatrixCPU, x::Vector)
+
+In-place matrix-vector multiplication `result = hmatrix * x` for the CPU
+reference structure `HMatrixCPU`. `result` is fully overwritten.
+"""
 function mul!(result::Vector, hmatrix::HMatrixCPU, x::Vector)
     fill!(result, 0)
 
@@ -31,159 +36,176 @@ function mul!(result::Vector, hmatrix::HMatrixCPU, x::Vector)
     return result
 end
 
-# Overloaded `*` function for HMatrix and Vector
+"""
+    *(hmatrix::HMatrixCPU, x::Vector)
+
+Matrix-vector multiplication for the CPU reference structure `HMatrixCPU`,
+returning a freshly allocated result vector.
+"""
 function *(hmatrix::HMatrixCPU, x::Vector)
     result = zeros(eltype(x), size(hmatrix.K, 1))
     mul!(result, hmatrix, x)
     return result
 end
 
-@kernel function V_mult_vec_kernel!(result, @Const(V_data), @Const(block_indices),
-                                    @Const(source_map), @Const(input_vec))
-    I = @index(Global, Linear)
-    I = div(I - 1, 16) + 1 # 32 is slgithly faster than 16
-    idx = @index(Local, Linear) #local index within the block
-    i = (idx - 1) % 16 #local index within the wrap (from 0 to 15)
+# ---------------------------------------------------------------------------
+# Backend kernels for the CSR-compressed HMatrix.
+#
+# Both kernels are plain thread-per-row dot products: no shared memory, no
+# workgroup barriers, no warp-level lane assumptions and no atomics. Every
+# kernel explicitly bounds-checks its thread index, so kernel launches are
+# insensitive to padding threads added by non-divisible ndranges.
+# ---------------------------------------------------------------------------
 
-    cache_size = @uniform @groupsize()
-    cache = @localmem eltype(result) cache_size
+"""
+    permute_to_cluster!(x_buffer, source_map, x)
 
-    @inbounds start_col = block_indices[1, I]
-    @inbounds end_col = block_indices[2, I]
-    @inbounds offset = block_indices[3, I]
-
-    acc_sum = zero(eltype(result))
-    @inbounds begin
-        J = offset + i + 1
-        for j in (start_col + i):16:end_col
-            acc_sum += V_data[J] * input_vec[source_map[j]]
-            J += 16
-        end
-        cache[idx] = acc_sum
-    end
-    @synchronize
-
-    j::Int = 8
-    while j > 0
-        if i < j
-            @inbounds cache[idx] += cache[idx + j]
-        end
-        @synchronize
-        j = j ÷ 2
-    end
-
-    if i == 0
-        @inbounds result[I] = cache[idx]
+Gather kernel: `x_buffer[i] = x[source_map[i]]`, permuting the input vector
+into cluster order so that all subsequent CSR accesses are sequential.
+"""
+@kernel function permute_to_cluster!(x_buffer, source_map, x)
+    i = @index(Global, Linear)
+    @inbounds if i <= length(x_buffer)
+        x_buffer[i] = x[source_map[i]]
     end
 end
 
-@kernel function DU_mult_vec_kernel!(result, @Const(D_blocks), @Const(U_blocks),
-                                     @Const(dense_block_indices), @Const(U_block_indices),
-                                     @Const(target_map), @Const(source_map),
-                                     @Const(Vx_intermediate), @Const(input_vec))
-    I = @index(Global, Linear)
-    I = div(I - 1, 4) + 1
-    idx = @index(Local, Linear) #local index within the block
-    i = (idx - 1) % 4 #local index
+"""
+    csr_mul_vec_warp!(out, rowptr, colval, val, x)
 
-    cache_size = @uniform @groupsize()
-    cache = @localmem eltype(result) cache_size
+Workgroup-per-row CSR sparse matrix-vector product with a fixed workgroup size
+of 32 (one warp on CUDA): the 32 threads of a workgroup stride through one CSR
+row, and the partial sums are reduced with a tree over 32 local-memory slots.
 
-    acc_sum = zero(eltype(result))
+This provides 32x more resident threads than the thread-per-row form, which is
+what hides the memory latency of the dot products on GPUs. Since the ndrange is
+`32 * rows` and the workgroup size is 32, launches never have padding threads.
+The reduction uses a `for` loop over the tree levels (not a `while` loop with a
+hoisted counter) so that no kernel variable is consumed outside the segments
+guarded by KernelAbstractions' active-lane check.
+"""
+@kernel function csr_mul_vec_warp!(out, rowptr, colval, val, x)
+    row = @index(Group, Linear)
+    t = @index(Local, Linear)
+    cache = @localmem eltype(out) 32
 
-    # Dense block multiplication
-    for block in 1:size(dense_block_indices, 2)
-        @inbounds start_row = dense_block_indices[1, block]
-        @inbounds end_row = dense_block_indices[2, block]
-        if I < start_row || I > end_row
-            continue
+    @inbounds if row <= length(out)
+        p0 = rowptr[row]
+        p1 = rowptr[row + 1]
+        s = zero(eltype(out))
+        for k in (p0 + t):32:p1
+            s += val[k] * x[colval[k]]
         end
-        @inbounds start_col = dense_block_indices[3, block]
-        @inbounds end_col = dense_block_indices[4, block]
-        @inbounds data_offset = dense_block_indices[5, block]
-
-        J = data_offset + (I - start_row) * (end_col - start_col + 1) + i + 1
-        for j in (start_col + i):4:end_col
-            @inbounds acc_sum += D_blocks[J] * input_vec[source_map[j]]
-            J += 4
-        end
+        cache[t] = s
     end
-
-    # U block multiplication with Vx
-    for block in 1:size(U_block_indices, 2)
-        @inbounds start_row = U_block_indices[1, block]
-        @inbounds end_row = U_block_indices[2, block]
-        if I < start_row || I > end_row
-            continue
-        end
-
-        @inbounds start_col = U_block_indices[3, block]
-        @inbounds end_col = U_block_indices[4, block]
-        @inbounds data_offset = U_block_indices[5, block]
-
-        J = data_offset + (I - start_row) * (end_col - start_col + 1) + i + 1
-        for j in (start_col + i):4:end_col
-            @inbounds acc_sum += U_blocks[J] * Vx_intermediate[j]
-            J += 4
-        end
-    end
-
-    @inbounds cache[idx] = acc_sum
     @synchronize
 
-    j::Int = 2
-    while j > 0
-        if i < j
-            @inbounds cache[idx] += cache[idx + j]
+    for s in (16, 8, 4, 2, 1)
+        if t <= s
+            @inbounds cache[t] += cache[t + s]
         end
         @synchronize
-        j = j ÷ 2
     end
 
-    if i == 0
-        @inbounds result[target_map[I]] = cache[idx]
+    @inbounds if t == 1 && row <= length(out)
+        out[row] = cache[1]
+    end
+end
+
+"""
+    near_u_mul_vec_warp!(y, tmap, near_ptr, near_col, near_val, x, u_ptr, u_col, u_val, vx)
+
+Workgroup-per-row fused near-field and far-field kernel (workgroup size 32).
+For each matrix row (cluster order) the 32 threads stride through the near-field
+and `U` segments of the row, reduce both partial sums, and thread 1 scatters the
+total through `tmap`:
+
+```
+y[tmap[row]] = Σ near_val·x[near_col] + Σ u_val·vx[u_col]
+```
+
+Since the near-field and `U` row sets of the cluster tree partition the matrix
+rows and `tmap` is a permutation, every entry of `y` is written exactly once —
+no atomics and no pre-zeroing required.
+"""
+@kernel function near_u_mul_vec_warp!(y, tmap, near_ptr, near_col, near_val, x,
+                                      u_ptr, u_col, u_val, vx)
+    row = @index(Group, Linear)
+    t = @index(Local, Linear)
+    cache_near = @localmem eltype(y) 32
+    cache_u = @localmem eltype(y) 32
+
+    @inbounds if row <= length(y)
+        p0 = near_ptr[row]
+        p1 = near_ptr[row + 1]
+        s1 = zero(eltype(y))
+        for k in (p0 + t):32:p1
+            s1 += near_val[k] * x[near_col[k]]
+        end
+        cache_near[t] = s1
+
+        q0 = u_ptr[row]
+        q1 = u_ptr[row + 1]
+        s2 = zero(eltype(y))
+        for k in (q0 + t):32:q1
+            s2 += u_val[k] * vx[u_col[k]]
+        end
+        cache_u[t] = s2
+    end
+    @synchronize
+
+    for s in (16, 8, 4, 2, 1)
+        if t <= s
+            @inbounds cache_near[t] += cache_near[t + s]
+            @inbounds cache_u[t] += cache_u[t + s]
+        end
+        @synchronize
+    end
+
+    @inbounds if t == 1 && row <= length(y)
+        y[tmap[row]] = cache_near[1] + cache_u[1]
     end
 end
 
 """
     mul!(result::AbstractArray{T}, hmatrix::HMatrix{T}, x::AbstractArray{T}) where T
 
-Performs a matrix-vector multiplication using a hierarchical matrix (`HMatrix`) structure, storing the result in the provided array `result`.
+Performs a matrix-vector multiplication using the CSR-compressed hierarchical
+matrix (`HMatrix`), storing the result in the provided array `result`.
+`result` is fully overwritten.
 
 # Arguments
-- `result::AbstractArray{T}`: Preallocated array to store the result of the matrix-vector multiplication.
+- `result::AbstractArray{T}`: Preallocated array to store the result of the
+  matrix-vector multiplication (same backend as `x` and the `HMatrix`).
 - `hmatrix::HMatrix{T}`: The hierarchical matrix used for the multiplication.
 - `x::AbstractArray{T}`: The input vector to be multiplied.
-
 """
 function mul!(result::AbstractArray{T}, hmatrix::HMatrix{T}, x::AbstractArray{T}) where {T}
-    # Get the size of the original matrix
-    m, n = size(hmatrix.K)
-
-    # Select the backend for kernel execution based on the input array type
     backend = KernelAbstractions.get_backend(x)
+    if KernelAbstractions.get_backend(hmatrix.near_data) != backend
+        error("HMatrix and input vector live on different backends " *
+              "($(KernelAbstractions.get_backend(hmatrix.near_data)) vs $backend); " *
+              "rebuild the HMatrix on the same backend as the vectors.")
+    end
 
-    # Launch kernel for multiplying V matrices with the input vector
-    kernel! = V_mult_vec_kernel!(backend, groupsize[])
-    kernel!(hmatrix.Vx_buffer,                 # Output buffer for intermediate V * x result
-            hmatrix.V_matrices,                # V matrices data
-            hmatrix.V_block_indices,           # Indices of V blocks
-            hmatrix.source_index_map,          # Source index mapping
-            x;                                 # Input vector
-            ndrange=16 * length(hmatrix.Vx_buffer))
+    # Phase 0: permute x into cluster order (sequential accesses afterwards)
+    kernel! = permute_to_cluster!(backend, groupsize[])
+    kernel!(hmatrix.x_buffer, hmatrix.source_index_map, x; ndrange=hmatrix.n)
 
-    # Launch kernel for dense and U-matrix multiplications
-    kernel! = DU_mult_vec_kernel!(backend, groupsize[])
-    kernel!(result,                            # Output array for final result
-            hmatrix.dense_blocks,              # Dense blocks data
-            hmatrix.U_matrices,                # U matrices data
-            hmatrix.dense_block_indices,       # Indices of dense blocks
-            hmatrix.U_block_indices,           # Indices of U blocks
-            hmatrix.target_index_map,          # Target index mapping
-            hmatrix.source_index_map,          # Source index mapping
-            hmatrix.Vx_buffer,                 # Buffer containing V * x result
-            x;                                 # Input vector
-            ndrange=4 * m)
+    # Phase 1: far field V * x into the rank-row buffer (one warp per row)
+    L = length(hmatrix.vx_buffer)
+    if L > 0
+        kernel! = csr_mul_vec_warp!(backend, 32)
+        kernel!(hmatrix.vx_buffer, hmatrix.v_rowptr, hmatrix.v_colval,
+                hmatrix.v_data, hmatrix.x_buffer; ndrange=32 * L)
+    end
+
+    # Phase 2: fused near-field + U * vx, scattered to the original ordering
+    kernel! = near_u_mul_vec_warp!(backend, 32)
+    kernel!(result, hmatrix.target_index_map, hmatrix.near_rowptr,
+            hmatrix.near_colval, hmatrix.near_data, hmatrix.x_buffer,
+            hmatrix.u_rowptr, hmatrix.u_colval, hmatrix.u_data,
+            hmatrix.vx_buffer; ndrange=32 * hmatrix.m)
 
     return result
 end
@@ -191,7 +213,9 @@ end
 """
     *(hmatrix::HMatrix{T}, x::AbstractArray{T}) where T
 
-Overloaded multiplication operator for `HMatrix`. Performs the matrix-vector multiplication and returns a new result array.
+Overloaded multiplication operator for `HMatrix`. Performs the matrix-vector
+multiplication and returns a newly allocated result array on the same backend
+as `x`.
 
 # Arguments
 - `hmatrix::HMatrix{T}`: The hierarchical matrix used for the multiplication.
@@ -201,9 +225,9 @@ Overloaded multiplication operator for `HMatrix`. Performs the matrix-vector mul
 - `result::AbstractArray{T}`: The result of the matrix-vector multiplication.
 """
 function *(hmatrix::HMatrix{T}, x::AbstractArray{T}) where {T}
-    # Create a zero-initialized result array
-    result = create_zeros(T, size(hmatrix.K, 1))
-    # Call the in-place multiplication function
+    # the result follows the backend of the matrix, not the global default
+    backend = KernelAbstractions.get_backend(hmatrix.near_data)
+    result = KernelAbstractions.zeros(backend, T, hmatrix.m)
     mul!(result, hmatrix, x)
     return result
 end

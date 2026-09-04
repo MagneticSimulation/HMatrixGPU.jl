@@ -56,8 +56,9 @@ x = rand(3 * N)
 set_backend("cpu")
 h_flatten = HMatrix(K, cluster_targets, cluster_source; eta=1.5, eps=1e-6, flatten=true)
 
-ids = [c[3] + c[2] - c[1] + 1 for c in eachcol(h_flatten.V_block_indices)]
-@test maximum(ids) == length(h_flatten.V_matrices)
+d2 = info(h_flatten)
+@test d2["admissible_leaves"] == d["admissible_leaves"]
+@test d2["full_leaves"] == d["full_leaves"]
 
-# disable the test for now, as the flattened HMatrix only supports gpus
-# @test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)
+# the CSR structure now works on the CPU as well as on the GPUs
+@test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)

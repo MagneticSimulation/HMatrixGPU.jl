@@ -1,5 +1,6 @@
 using Random
 using LinearAlgebra
+using SparseArrays
 using HMatrixGPU
 using Test
 Random.seed!(10)
@@ -49,117 +50,73 @@ mul!(y, hmatrix, x)
 @test isapprox(K * x, hmatrix * x; atol=1e-5)
 @test isapprox(K * x, y; atol=1e-5)
 
+# ---------------------------------------------------------------------------
+# CSR-compressed structure
+# ---------------------------------------------------------------------------
 h_flatten = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
 
-ids = [c[3] + c[2] - c[1] + 1 for c in eachcol(h_flatten.V_block_indices)]
-@test maximum(ids) == length(h_flatten.V_matrices)
+# block statistics must match the reference structure
+d2 = info(h_flatten)
+@test d2["leaves"] == d["leaves"]
+@test d2["admissible_leaves"] == d["admissible_leaves"]
+@test d2["full_leaves"] == d["full_leaves"]
+@test d2["min_rank"] == d["min_rank"]
+@test d2["max_rank"] == d["max_rank"]
+@test isapprox(d2["compression_ratio"], d["compression_ratio"]; rtol=1e-12)
+@test h_flatten.ranks == [size(U, 2) for U in hmatrix.U_matrices]
+@test Base.size(h_flatten) == (N, N)
 
-function dense_multiply(hmatrix::HMatrixGPU.HMatrixCPU, x::Vector)
-    result = zeros(eltype(hmatrix.K), size(hmatrix.K, 1))
+# end-to-end product must match the reference structure and the exact kernel
+@test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)
 
+yf = zeros(N)
+mul!(yf, h_flatten, x)
+@test isapprox(K * x, yf; atol=1e-5)
+
+# the rank-row buffer must equal the stacked V * x products of the reference
+function vx_from_reference(hmatrix::HMatrixGPU.HMatrixCPU, x::Vector)
     x_ordered = x[hmatrix.source_index_map]
-
-    for i in 1:length(hmatrix.dense_blocks)
-        (row_start, row_end, col_start, col_end) = hmatrix.dense_block_indices[i]
-        dense_block = hmatrix.dense_blocks[i]
-        result[row_start:row_end] .+= dense_block * view(x_ordered, col_start:col_end)
+    out = Float64[]
+    for i in eachindex(hmatrix.V_matrices)
+        (rs, re, cs, ce) = hmatrix.approx_block_indices[i]
+        append!(out, hmatrix.V_matrices[i] * view(x_ordered, cs:ce))
     end
-
-    result[hmatrix.target_index_map] .= result
-    return result
+    return out
 end
+@test isapprox(Array(h_flatten.vx_buffer), vx_from_reference(hmatrix, x); atol=1e-9)
 
-function dense_multiply(hmatrix::HMatrixGPU.HMatrix, x::Vector)
-    result = zeros(eltype(hmatrix.K), size(hmatrix.K, 1))
-
-    source_map = hmatrix.source_index_map
-    target_map = hmatrix.target_index_map
-    indices = hmatrix.dense_block_indices
-    Ds_array = hmatrix.dense_blocks
-
-    for block in 1:size(indices, 2)
-        row_start = indices[1, block]
-        row_end = indices[2, block]
-        col_start = indices[3, block]
-        col_end = indices[4, block]
-        offset = indices[5, block]
-
-        for i in row_start:row_end
-            sum = 0.0
-            I = offset + (i - row_start) * (col_end - col_start + 1)
-            for j in col_start:col_end
-                I += 1
-                sum += Ds_array[I] * x[source_map[j]]
-            end
-
-            result[target_map[i]] += sum
+# the near-field CSR must reproduce the dense blocks of the reference structure.
+# CSR rows are in cluster order and column indices are cluster positions;
+# scatter both back to original indices and compare with `sparsify_hmatrix`.
+function near_matrix_from_csr(h_flatten)
+    ptr = Array(h_flatten.near_rowptr)
+    col = Array(h_flatten.near_colval)
+    val = Array(h_flatten.near_data)
+    tmap = Array(h_flatten.target_index_map)
+    smap = Array(h_flatten.source_index_map)
+    A = spzeros(length(ptr) - 1, h_flatten.n)
+    for i in 1:(length(ptr) - 1)
+        for k in (ptr[i] + 1):ptr[i + 1]
+            A[tmap[i], smap[col[k]]] += val[k]
         end
     end
-
-    return result
+    return A
 end
+S_ref = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster; eta=1.5)
+@test isapprox(near_matrix_from_csr(h_flatten), S_ref; atol=1e-12)
 
-a1 = dense_multiply(hmatrix, x)
-b1 = dense_multiply(h_flatten, x)
-@test isapprox(a1, b1; atol=1e-12)
-
-S = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster, eta=1.5)
-c = S*x
-@test isapprox(a1, c; atol=1e-12)
-
-function V_multiply(hmatrix::HMatrixGPU.HMatrixCPU, x::Vector)
-    result = zeros(eltype(hmatrix.K), size(hmatrix.K, 1))
-
-    x_ordered = x[hmatrix.source_index_map]
-
-    results = []
-
-    for i in 1:length(hmatrix.V_matrices)
-        (row_start, row_end, col_start, col_end) = hmatrix.approx_block_indices[i]
-        V = hmatrix.V_matrices[i]
-
-        result = V * view(x_ordered, col_start:col_end)
-        push!(results, result)
-    end
-
-    return vcat(results...)
-end
-
-function V_multiply(hmatrix::HMatrixGPU.HMatrix, x::Vector)
-    result = zeros(eltype(hmatrix.K), size(hmatrix.K, 1))
-
-    source_map = hmatrix.source_index_map
-    target_map = hmatrix.target_index_map
-    indices = hmatrix.V_block_indices
-    Vs_array = hmatrix.V_matrices
-
-    for i in 1:size(indices, 2)
-        col_start = indices[1, i]
-        col_end = indices[2, i]
-        offset = indices[3, i]
-
-        sum = 0.0
-        I = offset
-        for j in col_start:col_end
-            I += 1
-            sum += Vs_array[I] * x[source_map[j]]
-        end
-        hmatrix.Vx_buffer[i] = sum
-    end
-
-    return hmatrix.Vx_buffer
-end
-
-result1 = V_multiply(hmatrix, x)
-vx = V_multiply(h_flatten, x)
-@test isapprox(result1, vx; atol=1e-10)
-
-# we need to wait the issue to be fixed https://github.com/JuliaGPU/KernelAbstractions.jl/issues/544
-#@test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)
-
+# ---------------------------------------------------------------------------
+# CUDA
+# ---------------------------------------------------------------------------
 @using_gpu()
 set_backend("cuda")
 if CUDA.functional()
-    h_flatten = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
-    @test isapprox(hmatrix * x, Array(h_flatten * CuArray(x)); atol=1e-9)
+    h_gpu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
+    x_gpu = CuArray(x)
+    y_gpu = h_gpu * x_gpu
+    @test isapprox(hmatrix * x, Array(y_gpu); atol=1e-9)
+
+    y_gpu2 = CUDA.zeros(Float64, N)
+    mul!(y_gpu2, h_gpu, x_gpu)
+    @test isapprox(K * x, Array(y_gpu2); atol=1e-5)
 end

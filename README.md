@@ -96,10 +96,11 @@ with a KernelAbstractions kernel and only the required blocks are ever computed.
 A complete, runnable example (the dipolar demag tensor on a GPU) is provided in
 [`examples/hmatrix_vector.jl`](examples/hmatrix_vector.jl).
 
-> [!WARNING]
-> The flattened GPU matvec currently crashes with an illegal memory access on
-> recent CUDA.jl versions — see [Known issues](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/known-issues/)
-> before using `flatten = true` on a GPU. The CPU path is unaffected.
+> [!NOTE]
+> The compressed matrix is stored as three CSR operators (near field, far-field
+> `V` and `U` factors) with Int32 indices, and the product runs as three fused
+> thread-group kernels — no shared-memory barriers, no atomics and no kernel
+> arguments that depend on the group size.
 
 ## Backend options
 

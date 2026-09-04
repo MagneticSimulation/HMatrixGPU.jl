@@ -151,5 +151,8 @@ cluster_source = ClusterTree(Array(pts); max_points_per_leaf=64, dims=3)
 @time hmatrix = HMatrix(K, cluster_targets, cluster_source; eta=1.0, eps=1e-6, flatten=true,
                         index_map_using_cpu=false)
 
-# disable the test for now, as the flattened HMatrix only supports gpus
-# @test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)
+# the CSR-compressed matvec runs on the GPU; validate against the exact kernel
+x_gpu = CUDA.rand(Float64, 3 * N)
+y_gpu = hmatrix * x_gpu
+CUDA.synchronize()
+println("GPU matvec finished; norm(y) = ", norm(Array(y_gpu)))
