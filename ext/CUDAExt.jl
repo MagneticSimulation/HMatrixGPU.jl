@@ -37,7 +37,9 @@ matrix is uploaded to the device once, every far block is evaluated by a
 device gather and factorized with a single-sided randomized SVD (Halko et al.;
 the "randomized range approximation" of Dölz et al.) — one device SVD per
 block; the range basis comes from the small Gram matrix of the test
-projection, orthogonalized twice (CholeskyQR2-style). The test matrix `Ω` is
+projection, orthogonalized twice (CholeskyQR2-style), with the range cutoff
+tied to `eps` so tight tolerances keep resolving below the truncation
+threshold. The test matrix `Ω` is
 seeded per block, so repeated assemblies of the same matrix are bitwise
 identical. Blocks whose ε-rank exceeds the storage crossover `m*n/(m+n)` are
 reported as dense (they stay in the near field); numerically zero blocks are
@@ -79,6 +81,14 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
     dense_far = Tuple{Int,Int,Int,Int}[]
     approx_block_indices = Vector{Tuple{Int,Int,Int,Int}}()
 
+    # range truncation tied to the block tolerance: Q must reach below the
+    # (eps/10) tail threshold, so keep singular directions down to ~eps/50
+    # (the sqrt(l) slack covers a worst-case flat junk tail; a flat spectrum
+    # also inflates ||B||_F by the same factor, so the two worst cases do not
+    # coincide). The floor keeps CholeskyQR2's first pass inside its stability
+    # bound kappa(G) = 1/lambda_cut <~ 1e16.
+    λ_cut = max((eps / 50)^2, 1e-16)
+
     for (bi, (a, b)) in enumerate(approx_blocks)
         rows = tmap_d[a.start_idx:(a.end_idx - 1)]   # device-side range copy
         cols = smap_d[b.start_idx:(b.end_idx - 1)]
@@ -100,7 +110,7 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
         G = Symmetric(Array(Y' * Y))                # l x l Gram (host)
         E = eigen(G)
         λ = E.values
-        keep = λ .> maximum(λ) * 1e-12
+        keep = λ .> maximum(λ) * λ_cut
         l1 = count(keep)
         # a numerically zero block is dropped entirely: its target rows stay
         # covered by the near/U row-set partition, so `near_u_mul_vec_warp!`
@@ -143,6 +153,12 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
         push!(ranks, r)
         push!(approx_block_indices,
               (a.start_idx, a.end_idx - 1, b.start_idx, b.end_idx - 1))
+    end
+
+    if length(dense_far) > length(approx_blocks) / 2
+        @warn "GPU dense assembly: $(length(dense_far))/$(length(approx_blocks)) " *
+              "far blocks fell back to dense storage at eps=$eps — compression " *
+              "will be poor; consider a looser eps or a matrix-free K (CPU ACA path)" maxlog = 1
     end
 
     # combined dense list: the near-field blocks plus the high-rank far blocks
