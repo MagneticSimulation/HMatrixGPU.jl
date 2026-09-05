@@ -9,8 +9,10 @@ element matrices, dipolar/demagnetization tensors, log-potentials, ...) into
 **GPUs**. It is written with [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl),
 so the same code runs on NVIDIA, AMD, Intel and Apple GPUs as well as the CPU.
 
-The package is primarily developed for micromagnetic simulations: it provides the fast
-dense matrix–vector product for the finite-element demagnetization field in
+Typical applications include boundary-element matrices, covariance and
+spatial-statistics kernels, and the demagnetization tensors of micromagnetic
+simulations — for example the fast dense matrix–vector product of the
+finite-element demagnetization field in
 [MicroMagnetic.jl](https://github.com/MagneticSimulation/MicroMagnetic.jl).
 
 ## Features
