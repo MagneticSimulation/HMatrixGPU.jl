@@ -116,13 +116,14 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
     # randomized SVD needs no grouped pivoting).
     if !(B isa KernelAbstractions.CPU) && gpu_dense_assembly_available(B) &&
        K isa DenseMatrix
-        K_gpu, dense_all, Ustack, Urow_off, V_factors, approx_block_indices =
+        K_gpu, dense_all, U_factors, V_factors, ranks, approx_block_indices =
             build_matrices_gpu_dense(
                 Matrix(K), B, block_tree.target_index_map, block_tree.source_index_map,
                 dense_blocks, approx_blocks; eps=eps)
         return build_csr_hmatrix_gpu(K_gpu, B, size(K, 1), size(K, 2),
                                      target_map, source_map, dense_all,
-                                     approx_block_indices, Ustack, Urow_off, V_factors)
+                                     approx_block_indices, U_factors, V_factors,
+                                     ranks; T=eltype(K))
     end
 
     # CPU path: grouped ACA+ per block (threaded), then CSR packing
@@ -190,34 +191,20 @@ end
     end
 end
 
-# row-copy kernel: block-row t of the stacked U factors goes to its segment
-# in the interleaved u CSR data (destination starts recorded per block-row)
-@kernel function fill_u_rows!(u_data, @Const(Ustack), @Const(useg), @Const(blkid),
-                              @Const(urow_off), @Const(urow_local), @Const(vrank))
-    t = @index(Global, Linear)
-    @inbounds if t <= length(useg)
-        base = useg[t]
-        src = urow_off[blkid[t]] + urow_local[t] - 1
-        rr = vrank[t]
-        for jj in 1:rr
-            u_data[base + jj] = Ustack[src, jj]
-        end
-    end
-end
-
 function build_csr_hmatrix_gpu(K_gpu, backend::KernelAbstractions.Backend,
                                m::Int, n::Int,
                                target_map::Vector{Int}, source_map::Vector{Int},
                                dense_block_indices::Vector{Tuple{Int,Int,Int,Int}},
                                approx_block_indices::Vector{Tuple{Int,Int,Int,Int}},
-                               Ustack::AbstractMatrix, Urow_off::Vector{Int},
-                               V_factors::Vector{<:AbstractMatrix}; T::Type=Float64)
+                               U_factors::Vector{<:AbstractMatrix},
+                               V_factors::Vector{<:AbstractMatrix},
+                               ranks::Vector{Int}; T::Type=eltype(K_gpu))
     # near-field CSR index structure (host, indices only)
     near_rowptr, near_colval = near_csr_structure(dense_block_indices, m)
     nnz_near = near_rowptr[end]
 
-    # far-field CSR index structure (host)
-    ranks = [size(V, 1) for V in V_factors]
+    # far-field CSR index structure (host); the per-block ranks come from the
+    # randomized SVD loop
     L = sum(ranks; init=0)
     napprox = length(approx_block_indices)
     ndense = length(dense_block_indices)
@@ -225,17 +212,18 @@ function build_csr_hmatrix_gpu(K_gpu, backend::KernelAbstractions.Backend,
     vcnt = zeros(Int, L)
     uoff = 0
     for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
-        nc = size(V_factors[bi], 2)
-        for j in 1:size(V_factors[bi], 1)
+        r = ranks[bi]                    # the block's truncated rank (columns)
+        nc = ce - cs + 1                 # the block's own column count
+        for j in 1:r
             vcnt[uoff + j] = nc
         end
-        uoff += size(V_factors[bi], 1)
+        uoff += r
     end
     v_rowptr = [0; cumsum(vcnt)]
     v_colval = Vector{Int}(undef, v_rowptr[end])
     uoff = 0
     for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
-        r, ncols = size(V_factors[bi], 1), size(V_factors[bi], 2)
+        r, ncols = ranks[bi], ce - cs + 1
         for j in 1:r
             pos = v_rowptr[uoff + j]
             for jj in 1:ncols
@@ -253,33 +241,43 @@ function build_csr_hmatrix_gpu(K_gpu, backend::KernelAbstractions.Backend,
     end
     cumsum!(u_rowptr, u_rowptr)
     u_colval = Vector{Int}(undef, u_rowptr[end])
-    useg = Vector{Int}(undef, u_rowptr[end])          # per block-row: destination start
-    blkid = Vector{Int32}(undef, u_rowptr[end])       # per block-row: block index
-    urow_local = Vector{Int32}(undef, u_rowptr[end])  # per block-row: local row
-    vrank_flat = Vector{Int32}(undef, u_rowptr[end])  # per block-row: rank
+    # per (block, row) destination starts for the U scatter: a matrix row can
+    # receive U contributions from several admissible blocks, so cluster-row
+    # offsets alone are not enough — every block-row pair gets its own segment
+    nrows_u = sum(re - rs + 1 for (rs, re, cs, ce) in approx_block_indices; init=0)
+    useg = Vector{Int}(undef, nrows_u)             # 0-based u_data destinations
+    useg_off = zeros(Int, napprox + 1)
     cursor_u = u_rowptr[1:m]
     uoff = 0
     t = 0
     for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
         r = ranks[bi]
+        useg_off[bi] = t
         for ii in 1:(re - rs + 1)
             i = rs + ii - 1
             pos = cursor_u[i]
+            useg[t + ii] = pos
             for jj in 1:r
                 u_colval[pos + jj] = uoff + jj
-                t += 1
-                useg[t] = pos
-                blkid[t] = bi
-                urow_local[t] = ii
-                vrank_flat[t] = r
             end
             cursor_u[i] += r
         end
+        t += re - rs + 1
         uoff += r
+    end
+    useg_off[napprox + 1] = t
+
+    # Index arrays are stored as Int32 to halve the index traffic of the
+    # memory-bound matvec kernels; the near-field and low-rank nnz grow only
+    # linearly with the problem size, so Int32 is safe for any realistic size.
+    maxindex = max(near_rowptr[end], v_rowptr[end], u_rowptr[end], m, n, L)
+    if maxindex > typemax(Int32)
+        error("HMatrix: matrix too large for Int32 CSR indices (nnz = $maxindex).")
     end
 
     # move the index structures and allocate the data on the device
     move = a -> begin
+        KernelAbstractions.get_backend(a) == backend && return a
         dest = KernelAbstractions.zeros(backend, eltype(a), size(a))
         copyto!(dest, a)
         dest
@@ -289,34 +287,31 @@ function build_csr_hmatrix_gpu(K_gpu, backend::KernelAbstractions.Backend,
     tmap_d = move(Int32.(target_map))
     smap_d = move(Int32.(source_map))
     useg_d = move(Int32.(useg))
-    blkid_d = move(Int32.(blkid))
-    urow_local_d = move(Int32.(urow_local))
-    vrank_d = move(Int32.(vrank_flat))
-    urow_off_d = move(Int32.(Urow_off))
-    urow_off_d = move(Int32.(Urow_off))
     near_data = KernelAbstractions.zeros(backend, T, nnz_near)
     v_data = KernelAbstractions.zeros(backend, T, v_rowptr[end])
     u_data = KernelAbstractions.zeros(backend, T, u_rowptr[end])
 
     # near-field data: device gather from the uploaded matrix
-    kernel! = fill_near_data!(backend, groupsize[])
-    kernel!(near_data, near_rowptr_d, near_colval_d, K_gpu, tmap_d, smap_d;
-            ndrange=nnz_near)
+    if nnz_near > 0
+        kernel! = fill_near_data!(backend, groupsize[])
+        kernel!(near_data, near_rowptr_d, near_colval_d, K_gpu, tmap_d, smap_d;
+                ndrange=nnz_near)
+    end
 
-    # far-field data: v_data receives each block's V factor rows (they are
-    # consecutive in the v CSR); u_data is scattered per block-row by the
-    # fill_u_rows! kernel (the blocks sharing a target leaf interleave)
+    # far-field data: per block, the V factor rows are consecutive in the v CSR
+    # (one device-to-device broadcast each), and the U factor rows are scattered
+    # to the interleaved u segments (one kernel per block, destinations taken
+    # from the block's slice of `useg`)
     uoff = 0
     for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
-        V = V_factors[bi]
-        r, ncols = size(V)
+        r, ncols = ranks[bi], ce - cs + 1
         vr = (v_rowptr[uoff + 1] + 1):(v_rowptr[uoff + r] + ncols)
-        reshape(view(v_data, vr), ncols, r) .= transpose(V)
+        reshape(view(v_data, vr), ncols, r) .= V_factors[bi]
+        h = re - rs + 1
+        seg = view(useg_d, useg_off[bi] + 1:useg_off[bi] + h)
+        fill_u_block!(backend, 256)(u_data, seg, U_factors[bi], r; ndrange=h)
         uoff += r
     end
-    kernel! = fill_u_rows!(backend, groupsize[])
-    kernel!(u_data, Ustack, useg_d, blkid_d, urow_off_d, urow_local_d, vrank_d;
-            ndrange=t)
 
     return HMatrix(m, n,
                    move(Int32.(target_map)), move(Int32.(source_map)),
@@ -638,4 +633,16 @@ function info(hmatrix::HMatrix)
                 "rank_rows" => length(hmatrix.vx_buffer),
                 "near_field_nnz" => nnz_near, "low_rank_nnz" => nnz_lowrank,
                 "compression_ratio" => original_size / compressed_size)
+end
+
+# per-block scatter: block-row ii of the U factor goes to its segment in the
+# interleaved u CSR data (destinations recorded per block-row pair, so matrix
+# rows shared by several blocks never collide)
+@kernel function fill_u_block!(u_data, @Const(useg), Uf, @Const(r))
+    ii = @index(Global, Linear)
+    @inbounds if ii <= length(useg)
+        for jj in 1:r
+            u_data[useg[ii] + jj] = Uf[ii, jj]
+        end
+    end
 end

@@ -4,6 +4,7 @@ using HMatrixGPU
 using CUDA
 using KernelAbstractions
 using LinearAlgebra
+using Random
 
 CUDA.allowscalar(false)
 
@@ -54,48 +55,63 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix{Float64},
                                              dense_blocks::Vector,
                                              approx_blocks::Vector;
                                              eps::Float64=1e-5)
-    K_gpu = CuArray(K_cpu)                      # uploaded once
-    ndense = length(dense_blocks)
+    # the assembly always computes in Float64 (the randomized SVD and the
+    # gathers are ill-conditioned in Float32); the caller stores in eltype(K)
+    K64 = eltype(K_cpu) === Float64 ? K_cpu : Float64.(K_cpu)
+    K_gpu = CuArray(K64)                        # uploaded once
+    tmap_d = CuArray(target_index_map)          # uploaded once, sliced per block
+    smap_d = CuArray(source_index_map)
 
+    # per-block device factors: U (m x r) materialized, V kept as an n x r
+    # view of the SVD result (column j = rank row j — the far-CSR row order,
+    # so the packing broadcasts it straight into v_data without transposing)
+    U_factors = AbstractMatrix{Float64}[]
+    V_factors = AbstractMatrix{Float64}[]
+    ranks = Int[]
     dense_far = Tuple{Int,Int,Int,Int}[]
-    U_factors = CuMatrix{Float64}[]
-    V_factors = CuMatrix{Float64}[]
     approx_block_indices = Vector{Tuple{Int,Int,Int,Int}}()
 
-    # factor arena: all blocks' U factors stacked vertically (padded to the
-    # widest block), V factors stacked in the far-CSR rank-row order — so the
-    # packing step is pure device-side copies with no host round trip
-    sum_m = sum(a.end_idx - a.start_idx for (a, b) in approx_blocks; init=0)
-    max_cols = 0
-    for (a, b) in approx_blocks
-        n = length(source_index_map[b.start_idx:(b.end_idx - 1)])
-        crossover = floor(Int, (a.end_idx - a.start_idx) * n /
-                              ((a.end_idx - a.start_idx) + n))
-        max_cols = max(max_cols, min(n, crossover + 16))
-    end
-    Ustack = CUDA.zeros(Float64, max(sum_m, 1), max(max_cols, 1))
-    Urow_off = zeros(Int, length(approx_blocks) + 1)
-
-    urow = 1                                  # next free row of the U arena
     for (bi, (a, b)) in enumerate(approx_blocks)
-        rows = target_index_map[a.start_idx:(a.end_idx - 1)]
-        cols = source_index_map[b.start_idx:(b.end_idx - 1)]
+        rows = tmap_d[a.start_idx:(a.end_idx - 1)]   # device-side range copy
+        cols = smap_d[b.start_idx:(b.end_idx - 1)]
         m, n = length(rows), length(cols)
-        Bi = K_gpu[CuArray(rows), CuArray(cols)]    # device gather (m x n)
+        Bi = K_gpu[rows, cols]                       # device gather (m x n)
 
         # storage crossover in columns; range-finder size with oversampling
         crossover = floor(Int, m * n / (m + n))
         l = min(min(m, n), crossover + 16)
 
-        Ω = CUDA.randn(n, l)                        # n x l test matrix
+        # one-sided randomized range: the basis comes from the small Gram
+        # matrix of the test projection (host eigen solve, l x l) so only ONE
+        # device SVD per block is needed
+        # per-block seeding keeps repeated assemblies of the same matrix
+        # bitwise identical (the same invariant as the CPU ACA path); the
+        # n x l draw is tiny, so the async host-to-device upload is free
+        Ω = CuArray(randn(MersenneTwister(bi), n, l))  # n x l test matrix
         Y = Bi * Ω                                  # m x l random range
+        G = Symmetric(Array(Y' * Y))                # l x l Gram (host)
+        E = eigen(G)
+        λ = E.values
+        keep = λ .> maximum(λ) * 1e-12
+        l1 = count(keep)
+        # a numerically zero block is dropped entirely: its target rows stay
+        # covered by the near/U row-set partition, so `near_u_mul_vec_warp!`
+        # writes each of them exactly once (as zero)
+        l1 == 0 && continue
+        Q = Y * CuArray(E.vectors[:, keep] .* (1 ./ sqrt.(λ[keep]))')  # m x l1 orthonormal
 
-        # two SVDs instead of QR + triangular solve: every operation used
-        # (gemm, gesvd) has a native cuSOLVER implementation
-        U1, S1, _ = svd(Y)                          # m x l, l, l x l
-        l1 = min(l, m)                              # svd(Y) truncates
-        Bt = U1[:, 1:l1]' * Bi                      # l1 x n projected block
-        U2, S2, V2 = svd(Bt)                        # l1 x n
+        # second Gram pass (CholeskyQR2-style): the first pass loses up to
+        # O(eps * lambda_max/lambda_min) orthogonality on fast-decaying spectra
+        G2 = Symmetric(Array(Q' * Q))
+        E2 = eigen(G2)
+        λ2 = E2.values
+        keep2 = λ2 .> maximum(λ2) * 1e-12
+        l1 = count(keep2)
+        l1 == 0 && continue                        # safety valve (λ2 ≈ 1 in theory)
+        Q = Q * CuArray(E2.vectors[:, keep2] .* (1 ./ sqrt.(λ2[keep2]))')
+
+        Bt = Q' * Bi                               # l1 x n projected block
+        U2, S2, V2 = svd(Bt)                       # the single device SVD
 
         # relative Frobenius tail truncation, measured on the projected block
         S2h = Array(S2)
@@ -104,17 +120,19 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix{Float64},
         r = something(findfirst(x -> x < (eps / 10) * block_norm, tails),
                       length(S2h)) - 1
 
-        if (r + 1) * (m + n) >= m * n
-            # ε-rank exceeds the storage crossover: keep the block dense
+        if S2h[end] > (eps / 10) * block_norm || (r + 1) * (m + n) >= m * n
+            # the range could not resolve the truncation (ε-rank beyond the
+            # crossover): keep the block dense
             push!(dense_far, (a.start_idx, a.end_idx - 1, b.start_idx, b.end_idx - 1))
             continue
         end
         r = max(r, 1)
-        Urow_off[bi] = urow
-        Ustack[urow:urow + m - 1, 1:r] .= U1[:, 1:l1] * (U2[:, 1:r] .* S2[1:r]')
-        push!(U_factors, view(Ustack, urow:urow + m - 1, 1:r))   # m x r (arena)
-        push!(V_factors, Matrix(V2[:, 1:r]'))                    # r x n
-        urow += m
+
+        Uf = Q * (U2[:, 1:r] .* S2[1:r]')           # m x r left factor
+        Vf = view(V2, 1:n, 1:r)                     # n x r right factor
+        push!(U_factors, Uf)
+        push!(V_factors, Vf)
+        push!(ranks, r)
         push!(approx_block_indices,
               (a.start_idx, a.end_idx - 1, b.start_idx, b.end_idx - 1))
     end
@@ -123,7 +141,7 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix{Float64},
     dense_near = [(a.start_idx, a.end_idx - 1, b.start_idx, b.end_idx - 1)
                   for (a, b) in dense_blocks]
     dense_all = vcat(dense_near, dense_far)
-    return K_gpu, dense_all, Ustack, Urow_off, V_factors, approx_block_indices
+    return K_gpu, dense_all, U_factors, V_factors, ranks, approx_block_indices
 end
 
 end
