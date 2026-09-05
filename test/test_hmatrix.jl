@@ -178,9 +178,9 @@ function test_gpu_dense_assembly_fallback()
     # dense Float64 log kernel + an incompressible random patch on the
     # first quarter arc: some far blocks fall back, others stay low-rank;
     # ring geometry at eta=1.5 guarantees cluster rows shared by several
-    # approx blocks (interleaved u segments). eps=1e-4 is the loosest
-    # tolerance with a mixed outcome — at eps <= 1e-5 every far block of
-    # the ring log kernel falls back to dense, leaving no low-rank path.
+    # approx blocks (interleaved u segments). eps=1e-4 is the FD demag
+    # working point; the tight-eps mixed scenario is covered by
+    # test_gpu_dense_assembly_tight_eps below.
     rng = MersenneTwister(42)
     Kd = Matrix{Float64}(undef, N, N)
     for j in 1:N, i in 1:N
@@ -214,6 +214,40 @@ function test_gpu_dense_assembly_fallback()
     @test Array(H2 * xd) == Array(H * xd)
 end
 test_functions("GPU dense assembly fallback", test_gpu_dense_assembly_fallback;
+               platforms=["CPU"])
+
+function test_gpu_dense_assembly_tight_eps()
+    CUDA.functional() || return
+
+    # same mixed matrix as the fallback test, but at eps=1e-6: before the
+    # eps-aware range cutoff every far block fell back at this tolerance;
+    # now the smooth blocks must compress again while the random patch
+    # still falls back (crossover guard is eps-independent)
+    rng = MersenneTwister(43)
+    Kd = Matrix{Float64}(undef, N, N)
+    for j in 1:N, i in 1:N
+        Kd[i, j] = K[i, j]
+    end
+    q = 1:div(N, 4)
+    Kd[q, q] .+= randn(rng, length(q), length(q))
+
+    bt = BlockTree(cluster, cluster; eta=1.5)
+    HMatrixGPU.merge_dense_matrices!(bt.root)
+    dense_blocks, approx_blocks = HMatrixGPU.traverse(bt)
+
+    H = HMatrix(Kd, cluster, cluster; eta=1.5, eps=1e-6, backend="cuda")
+    @test H.ndense > length(dense_blocks)          # patch still falls back
+    @test H.napprox > 0                            # smooth blocks compress at 1e-6
+
+    x = rand(N)
+    xd = CuArray(x)
+    @test norm(Kd * x - Array(H * xd)) / norm(Kd * x) < 1e-5
+
+    H2 = HMatrix(Kd, cluster, cluster; eta=1.5, eps=1e-6, backend="cuda")
+    @test H2.ranks == H.ranks
+    @test Array(H2 * xd) == Array(H * xd)
+end
+test_functions("GPU dense assembly tight eps", test_gpu_dense_assembly_tight_eps;
                platforms=["CPU"])
 
 @test_throws ErrorException HMatrix(complex.(K[1:4, 1:4]), cluster, cluster)
