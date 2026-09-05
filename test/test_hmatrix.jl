@@ -166,3 +166,54 @@ function near_matrix_from_csr(h)
 end
 S_ref = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster; eta=1.5)
 @test isapprox(near_matrix_from_csr(hmatrix), S_ref; atol=1e-12)
+
+# ---------------------------------------------------------------------------
+# GPU dense assembly: dense fallback, empty approx path and determinism.
+# Registered for the CPU platform only — the function builds explicitly with
+# backend="cuda" and returns early when no functional GPU is present.
+# ---------------------------------------------------------------------------
+function test_gpu_dense_assembly_fallback()
+    CUDA.functional() || return
+
+    # dense Float64 log kernel + an incompressible random patch on the
+    # first quarter arc: some far blocks fall back, others stay low-rank;
+    # ring geometry at eta=1.5 guarantees cluster rows shared by several
+    # approx blocks (interleaved u segments). eps=1e-4 is the loosest
+    # tolerance with a mixed outcome — at eps <= 1e-5 every far block of
+    # the ring log kernel falls back to dense, leaving no low-rank path.
+    rng = MersenneTwister(42)
+    Kd = Matrix{Float64}(undef, N, N)
+    for j in 1:N, i in 1:N
+        Kd[i, j] = K[i, j]
+    end
+    q = 1:div(N, 4)
+    Kd[q, q] .+= randn(rng, length(q), length(q))
+
+    bt = BlockTree(cluster, cluster; eta=1.5)
+    HMatrixGPU.merge_dense_matrices!(bt.root)
+    dense_blocks, approx_blocks = HMatrixGPU.traverse(bt)
+
+    H = HMatrix(Kd, cluster, cluster; eta=1.5, eps=1e-4, backend="cuda")
+    @test H.ndense > length(dense_blocks)          # ≥1 far block fell back
+    @test 0 < H.napprox < length(approx_blocks)    # ≥1 kept low-rank
+
+    x = rand(N)
+    xd = CuArray(x)
+    @test norm(Kd * x - Array(H * xd)) / norm(Kd * x) < 1e-4
+
+    # incompressible everywhere: every far block falls back (empty approx
+    # path: L=0, no per-block launches, mul! skips phase 1)
+    Kr = randn(rng, N, N)
+    Hr = HMatrix(Kr, cluster, cluster; eta=1.5, eps=1e-4, backend="cuda")
+    @test Hr.napprox == 0
+    @test norm(Kr * x - Array(Hr * xd)) / norm(Kr * x) < 1e-4
+
+    # deterministic assembly: rebuild → identical ranks, bitwise-identical y
+    H2 = HMatrix(Kd, cluster, cluster; eta=1.5, eps=1e-4, backend="cuda")
+    @test H2.ranks == H.ranks
+    @test Array(H2 * xd) == Array(H * xd)
+end
+test_functions("GPU dense assembly fallback", test_gpu_dense_assembly_fallback;
+               platforms=["CPU"])
+
+@test_throws ErrorException HMatrix(complex.(K[1:4, 1:4]), cluster, cluster)
