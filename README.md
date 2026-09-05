@@ -126,13 +126,6 @@ corresponding backend.
 - [API reference](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/api/)
 - [Known issues](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/known-issues/)
 
-## Acknowledgements
-
-The cluster/block tree construction and the ACA implementation are inspired by the
-excellent 𝓗-matrix tutorial in
-[TDE: A Tutorial on the Boundary Element Method](https://tbenthompson.com/book/tdes/hmatrix.html)
-by T. Ben Thompson.
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
