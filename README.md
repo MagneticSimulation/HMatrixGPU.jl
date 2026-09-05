@@ -69,8 +69,11 @@ info(H)                     # compression statistics
 y = H * rand(N)             # compressed matrix-vector product
 ```
 
-On the example above the compression ratio is ≈ 8.6× (268 leaves, ranks 4–5) and
-the relative error of the matvec with respect to the exact kernel is ≈ 1.6e-8.
+On the example above the compression ratio is ≈ 8.7× (268 leaves, ranks 4–5) and
+the relative error of the matvec with respect to the exact kernel is ≈ 1.6e-6.
+`eps` is a *relative* per-block tolerance (the ACA stopping criterion and the
+SVD recompression truncate at fractions of each block's norm), so the achieved
+accuracy is independent of the scale of the kernel.
 
 ## GPU usage
 

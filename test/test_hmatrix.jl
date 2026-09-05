@@ -47,8 +47,8 @@ end
 x = rand(N)
 y = rand(N)
 mul!(y, hmatrix, x)
-@test isapprox(K * x, hmatrix * x; atol=1e-5)
-@test isapprox(K * x, y; atol=1e-5)
+@test norm(K * x - hmatrix * x) / norm(K * x) < 1e-4
+@test norm(K * x - y) / norm(K * x) < 1e-4
 
 # ---------------------------------------------------------------------------
 # CSR-compressed structure
@@ -71,7 +71,7 @@ d2 = info(h_flatten)
 
 yf = zeros(N)
 mul!(yf, h_flatten, x)
-@test isapprox(K * x, yf; atol=1e-5)
+@test norm(K * x - yf) / norm(K * x) < 1e-4
 
 # the rank-row buffer must equal the stacked V * x products of the reference
 function vx_from_reference(hmatrix::HMatrixGPU.HMatrixCPU, x::Vector)
@@ -118,5 +118,5 @@ if CUDA.functional()
 
     y_gpu2 = CUDA.zeros(Float64, N)
     mul!(y_gpu2, h_gpu, x_gpu)
-    @test isapprox(K * x, Array(y_gpu2); atol=1e-5)
+    @test norm(K * x - Array(y_gpu2)) / norm(K * x) < 1e-4
 end

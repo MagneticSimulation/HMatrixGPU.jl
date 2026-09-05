@@ -102,7 +102,8 @@ trees `X` and `Y`.
 - `svd_recompress`: Recompress the ACA factors with a truncated SVD (default).
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
-                 flatten=true, index_map_using_cpu=true, svd_recompress=true)
+                 flatten=true, index_map_using_cpu=true, svd_recompress=true,
+                 row_block_size=1, col_block_size=1)
     block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
     merge_dense_matrices!(block_tree.root)
 
@@ -116,7 +117,9 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                                                                                                        dense_blocks,
                                                                                                        approx_blocks;
                                                                                                        eps=eps,
-                                                                                                       svd_recompress=svd_recompress)
+                                                                                                       svd_recompress=svd_recompress,
+                                                                                                       row_block=row_block_size,
+                                                                                                       col_block=col_block_size)
 
     # Return CPU-based structure if flatten is false
     if !flatten
@@ -278,7 +281,8 @@ Builds dense and low-rank approximated matrices from `K` based on block structur
 """
 function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
                         source_index_map::AbstractArray{Int}, dense_blocks::Vector,
-                        approx_blocks::Vector; eps=1e-5, svd_recompress=true)
+                        approx_blocks::Vector; eps=1e-5, svd_recompress=true,
+                        row_block=1, col_block=1)
     dense_matrices = Matrix[]  # Dense blocks
     U_matrices = Matrix[]  # Low-rank U matrices
     V_matrices = Matrix[]  # Low-rank V matrices
@@ -300,15 +304,21 @@ function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
         source_ids = view(source_index_map, (b.start_idx):(b.end_idx - 1))
         target_ids_cpu = collect(target_ids)
         source_ids_cpu = collect(source_ids)
-        Uc, Vc = ACA_plus(length(target_ids), length(source_ids),
-                          I -> K[target_ids_cpu[I], source_ids],
-                          J -> K[target_ids, source_ids_cpu[J]], eps / 10.0)
-        if isa(Uc, Matrix) && isa(Vc, Matrix) && svd_recompress
-            Uc, Vc = SVD_recompress(Uc, Vc, eps)
+        # the ACA runs one order tighter than the SVD recompression; with the
+        # relative stopping criteria this keeps the accumulated matvec error at
+        # the level of the user-facing tolerance eps
+        Uc, Vc, converged = ACA_plus(length(target_ids), length(source_ids),
+                                     I -> K[target_ids_cpu[I], source_ids],
+                                     J -> K[target_ids, source_ids_cpu[J]],
+                                     eps / 10.0; row_block=row_block,
+                                     col_block=col_block)
+        if converged && isa(Uc, Matrix) && isa(Vc, Matrix) && svd_recompress
+            Uc, Vc = SVD_recompress(Uc, Vc, eps / 10.0)
         end
 
-        # Check if approximation is beneficial, otherwise store as dense block
-        if size(Uc, 1) * size(Uc, 2) + size(Vc, 1) * size(Vc, 2) <
+        # Check if approximation is beneficial and the ACA converged, otherwise
+        # store as dense block
+        if converged && size(Uc, 1) * size(Uc, 2) + size(Vc, 1) * size(Vc, 2) <
            length(target_ids) * length(source_ids)
             push!(U_matrices, Uc)
             push!(V_matrices, Vc)
