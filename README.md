@@ -32,6 +32,9 @@ finite-element demagnetization field in
   `HMatrix` type — the device placement follows the data (`like=` keyword or
   the global backend), and CPU and GPU instances can coexist.
 
+Runnable application examples (scalar BEM, covariance, vector demagnetization
+kernels) are in [examples/](examples/README.md).
+
 ## Installation
 
 ```julia
