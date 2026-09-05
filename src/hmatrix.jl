@@ -116,15 +116,13 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
     # randomized SVD needs no grouped pivoting).
     if !(B isa KernelAbstractions.CPU) && gpu_dense_assembly_available(B) &&
        K isa DenseMatrix
-        dense_matrices, U_matrices, V_matrices, dense_block_indices,
-        approx_block_indices = build_matrices_gpu_dense(
-            Matrix(K), B, block_tree.target_index_map, block_tree.source_index_map,
-            dense_blocks, approx_blocks; eps=eps)
-        return build_csr_hmatrix(eltype(K), size(K, 1), size(K, 2),
-                                 target_map, source_map,
-                                 dense_matrices, dense_block_indices,
-                                 U_matrices, V_matrices, approx_block_indices;
-                                 backend=B)
+        K_gpu, dense_all, Ustack, Urow_off, V_factors, approx_block_indices =
+            build_matrices_gpu_dense(
+                Matrix(K), B, block_tree.target_index_map, block_tree.source_index_map,
+                dense_blocks, approx_blocks; eps=eps)
+        return build_csr_hmatrix_gpu(K_gpu, B, size(K, 1), size(K, 2),
+                                     target_map, source_map, dense_all,
+                                     approx_block_indices, Ustack, Urow_off, V_factors)
     end
 
     # CPU path: grouped ACA+ per block (threaded), then CSR packing
@@ -144,6 +142,191 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                              U_matrices, V_matrices, approx_block_indices;
                              backend=B)
 end
+
+# GPU packing: build the three CSR operators with the factors already on the
+# device; the near-field data is gathered from the uploaded matrix by a kernel
+# near-field CSR index structure for the GPU packing path (host, indices only)
+function near_csr_structure(dense_block_indices::Vector{Tuple{Int,Int,Int,Int}},
+                            m::Int)
+    rowptr = zeros(Int, m + 1)
+    for (rs, re, cs, ce) in dense_block_indices
+        len = ce - cs + 1
+        for i in rs:re
+            rowptr[i + 1] += len
+        end
+    end
+    cumsum!(rowptr, rowptr)
+    colval = Vector{Int}(undef, rowptr[end])
+    cursor = rowptr[1:m]
+    for (rs, re, cs, ce) in dense_block_indices
+        ncols = ce - cs + 1
+        for ii in 1:(re - rs + 1)
+            pos = cursor[rs + ii - 1]
+            for jj in 1:ncols
+                colval[pos + jj] = cs + jj - 1
+            end
+            cursor[rs + ii - 1] += ncols
+        end
+    end
+    return rowptr, colval
+end
+
+# gather kernel: near_data[k] = K[tmap[row], smap[colval[k]]] with the row
+# found by binary search over the CSR row offsets
+@kernel function fill_near_data!(out, @Const(rowptr), @Const(colval), @Const(Kmat),
+                                 @Const(tmap), @Const(smap))
+    k = @index(Global, Linear)
+    @inbounds if k <= length(out)
+        lo, hi = 1, length(rowptr) - 1
+        while lo < hi
+            mid = (lo + hi + 1) >>> 1
+            if rowptr[mid] < k
+                lo = mid
+            else
+                hi = mid - 1
+            end
+        end
+        out[k] = Kmat[tmap[lo], smap[colval[k]]]
+    end
+end
+
+# row-copy kernel: block-row t of the stacked U factors goes to its segment
+# in the interleaved u CSR data (destination starts recorded per block-row)
+@kernel function fill_u_rows!(u_data, @Const(Ustack), @Const(useg), @Const(blkid),
+                              @Const(urow_off), @Const(urow_local), @Const(vrank))
+    t = @index(Global, Linear)
+    @inbounds if t <= length(useg)
+        base = useg[t]
+        src = urow_off[blkid[t]] + urow_local[t] - 1
+        rr = vrank[t]
+        for jj in 1:rr
+            u_data[base + jj] = Ustack[src, jj]
+        end
+    end
+end
+
+function build_csr_hmatrix_gpu(K_gpu, backend::KernelAbstractions.Backend,
+                               m::Int, n::Int,
+                               target_map::Vector{Int}, source_map::Vector{Int},
+                               dense_block_indices::Vector{Tuple{Int,Int,Int,Int}},
+                               approx_block_indices::Vector{Tuple{Int,Int,Int,Int}},
+                               Ustack::AbstractMatrix, Urow_off::Vector{Int},
+                               V_factors::Vector{<:AbstractMatrix}; T::Type=Float64)
+    # near-field CSR index structure (host, indices only)
+    near_rowptr, near_colval = near_csr_structure(dense_block_indices, m)
+    nnz_near = near_rowptr[end]
+
+    # far-field CSR index structure (host)
+    ranks = [size(V, 1) for V in V_factors]
+    L = sum(ranks; init=0)
+    napprox = length(approx_block_indices)
+    ndense = length(dense_block_indices)
+
+    vcnt = zeros(Int, L)
+    uoff = 0
+    for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
+        nc = size(V_factors[bi], 2)
+        for j in 1:size(V_factors[bi], 1)
+            vcnt[uoff + j] = nc
+        end
+        uoff += size(V_factors[bi], 1)
+    end
+    v_rowptr = [0; cumsum(vcnt)]
+    v_colval = Vector{Int}(undef, v_rowptr[end])
+    uoff = 0
+    for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
+        r, ncols = size(V_factors[bi], 1), size(V_factors[bi], 2)
+        for j in 1:r
+            pos = v_rowptr[uoff + j]
+            for jj in 1:ncols
+                v_colval[pos + jj] = cs + jj - 1
+            end
+        end
+        uoff += r
+    end
+    u_rowptr = zeros(Int, m + 1)
+    for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
+        r = ranks[bi]
+        for i in rs:re
+            u_rowptr[i + 1] += r
+        end
+    end
+    cumsum!(u_rowptr, u_rowptr)
+    u_colval = Vector{Int}(undef, u_rowptr[end])
+    useg = Vector{Int}(undef, u_rowptr[end])          # per block-row: destination start
+    blkid = Vector{Int32}(undef, u_rowptr[end])       # per block-row: block index
+    urow_local = Vector{Int32}(undef, u_rowptr[end])  # per block-row: local row
+    vrank_flat = Vector{Int32}(undef, u_rowptr[end])  # per block-row: rank
+    cursor_u = u_rowptr[1:m]
+    uoff = 0
+    t = 0
+    for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
+        r = ranks[bi]
+        for ii in 1:(re - rs + 1)
+            i = rs + ii - 1
+            pos = cursor_u[i]
+            for jj in 1:r
+                u_colval[pos + jj] = uoff + jj
+                t += 1
+                useg[t] = pos
+                blkid[t] = bi
+                urow_local[t] = ii
+                vrank_flat[t] = r
+            end
+            cursor_u[i] += r
+        end
+        uoff += r
+    end
+
+    # move the index structures and allocate the data on the device
+    move = a -> begin
+        dest = KernelAbstractions.zeros(backend, eltype(a), size(a))
+        copyto!(dest, a)
+        dest
+    end
+    near_rowptr_d = move(Int32.(near_rowptr))
+    near_colval_d = move(Int32.(near_colval))
+    tmap_d = move(Int32.(target_map))
+    smap_d = move(Int32.(source_map))
+    useg_d = move(Int32.(useg))
+    blkid_d = move(Int32.(blkid))
+    urow_local_d = move(Int32.(urow_local))
+    vrank_d = move(Int32.(vrank_flat))
+    urow_off_d = move(Int32.(Urow_off))
+    urow_off_d = move(Int32.(Urow_off))
+    near_data = KernelAbstractions.zeros(backend, T, nnz_near)
+    v_data = KernelAbstractions.zeros(backend, T, v_rowptr[end])
+    u_data = KernelAbstractions.zeros(backend, T, u_rowptr[end])
+
+    # near-field data: device gather from the uploaded matrix
+    kernel! = fill_near_data!(backend, groupsize[])
+    kernel!(near_data, near_rowptr_d, near_colval_d, K_gpu, tmap_d, smap_d;
+            ndrange=nnz_near)
+
+    # far-field data: v_data receives each block's V factor rows (they are
+    # consecutive in the v CSR); u_data is scattered per block-row by the
+    # fill_u_rows! kernel (the blocks sharing a target leaf interleave)
+    uoff = 0
+    for (bi, (rs, re, cs, ce)) in enumerate(approx_block_indices)
+        V = V_factors[bi]
+        r, ncols = size(V)
+        vr = (v_rowptr[uoff + 1] + 1):(v_rowptr[uoff + r] + ncols)
+        reshape(view(v_data, vr), ncols, r) .= transpose(V)
+        uoff += r
+    end
+    kernel! = fill_u_rows!(backend, groupsize[])
+    kernel!(u_data, Ustack, useg_d, blkid_d, urow_off_d, urow_local_d, vrank_d;
+            ndrange=t)
+
+    return HMatrix(m, n,
+                   move(Int32.(target_map)), move(Int32.(source_map)),
+                   near_rowptr_d, near_colval_d, near_data,
+                   move(Int32.(v_rowptr)), move(Int32.(v_colval)), move(v_data),
+                   move(Int32.(u_rowptr)), move(Int32.(u_colval)), move(u_data),
+                   move(zeros(T, L)), move(zeros(T, n)),
+                   ranks, ndense, napprox)
+end
+
 
 """
     build_csr_hmatrix(T, m, n, target_map, source_map, dense_matrices, dense_block_indices,
