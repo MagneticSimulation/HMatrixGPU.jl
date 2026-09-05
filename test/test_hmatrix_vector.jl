@@ -29,7 +29,7 @@ K = MyCustomMatrix(pts, pts)
 cluster_targets = ClusterTree(pts; max_points_per_leaf=64)
 cluster_source = ClusterTree(pts; max_points_per_leaf=64, dims=3)
 hmatrix = HMatrix(K, cluster_targets, cluster_source; eta=1.5, eps=1e-6,
-                  flatten=false, row_block_size=1, col_block_size=3)
+                  row_block_size=1, col_block_size=3)
 
 @test length(Set(cluster_source.index_map)) == 3 * N
 @test maximum(cluster_source.index_map) == 3 * N
@@ -39,28 +39,11 @@ d = info(hmatrix)
 
 @test d["compression_ratio"] > 3
 
-for M in hmatrix.dense_blocks
-    @test !any(isnan, M)
-end
-
-for U in hmatrix.U_matrices
-    @test !any(isnan, U)
-end
-
-for V in hmatrix.V_matrices
-    @test !any(isnan, V)
-end
+@test !any(isnan, Array(hmatrix.near_data))
+@test !any(isnan, Array(hmatrix.v_data))
+@test !any(isnan, Array(hmatrix.u_data))
 
 x = rand(3 * N)
 @test norm(K * x - hmatrix * x) / norm(K * x) < 1e-4
 
-set_backend("cpu")
-h_flatten = HMatrix(K, cluster_targets, cluster_source; eta=1.5, eps=1e-6,
-                    flatten=true, row_block_size=1, col_block_size=3)
-
-d2 = info(h_flatten)
-@test d2["admissible_leaves"] == d["admissible_leaves"]
-@test d2["full_leaves"] == d["full_leaves"]
-
-# the CSR structure now works on the CPU as well as on the GPUs
-@test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)
+@test norm(K * x - hmatrix * x) / norm(K * x) < 1e-4

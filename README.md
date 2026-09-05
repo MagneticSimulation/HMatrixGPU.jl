@@ -64,8 +64,8 @@ K = Laplace2D(pts, pts)
 X = ClusterTree(pts; max_points_per_leaf = 64)
 Y = ClusterTree(pts; max_points_per_leaf = 64)
 
-# Build the compressed matrix (flatten=false keeps a CPU reference structure)
-H = HMatrix(K, X, Y; eta = 1.5, eps = 1e-6, flatten = false)
+# Build the compressed matrix (the same structure runs on CPU and GPU)
+H = HMatrix(K, X, Y; eta = 1.5, eps = 1e-6)
 
 info(H)                     # compression statistics
 y = H * rand(N)             # compressed matrix-vector product
@@ -86,12 +86,11 @@ using HMatrixGPU, CUDA   # loading CUDA.jl activates the CUDA backend automatica
 # set_backend("cuda")     # or "amd", "oneapi", "metal", "cpu"
 ```
 
-The `HMatrix` should then be constructed with `flatten = true`, which stores all
-blocks in flat device arrays so that the matvec runs as two kernels
-(`V*x` followed by a fused dense/`U` kernel):
+The `HMatrix` stores all blocks in flat device arrays so that the matvec runs
+as three kernels (a permutation, `V*x`, and a fused near-field/`U` kernel):
 
 ```julia
-H = HMatrix(K, X, Y; eta = 1.0, eps = 1e-6, flatten = true)
+H = HMatrix(K, X, Y; eta = 1.0, eps = 1e-6)
 y = H * x            # x must already live on the GPU (e.g. CuArray)
 ```
 

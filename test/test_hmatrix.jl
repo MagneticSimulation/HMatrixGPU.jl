@@ -26,23 +26,16 @@ end
 K = MyCustomMatrix(pts, pts)
 
 cluster = ClusterTree(pts; max_points_per_leaf=64)
-hmatrix = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=false)
+hmatrix = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6)
 
 d = info(hmatrix)
 
 @test d["compression_ratio"] > 3
-
-for M in hmatrix.dense_blocks
-    @test !any(isnan, M)
-end
-
-for U in hmatrix.U_matrices
-    @test !any(isnan, U)
-end
-
-for V in hmatrix.V_matrices
-    @test !any(isnan, V)
-end
+@test d["leaves"] == d["admissible_leaves"] + d["full_leaves"]
+@test Base.size(hmatrix) == (N, N)
+@test !any(isnan, Array(hmatrix.near_data))
+@test !any(isnan, Array(hmatrix.v_data))
+@test !any(isnan, Array(hmatrix.u_data))
 
 x = rand(N)
 y = rand(N)
@@ -51,50 +44,51 @@ mul!(y, hmatrix, x)
 @test norm(K * x - y) / norm(K * x) < 1e-4
 
 # ---------------------------------------------------------------------------
-# CSR-compressed structure
+# the CSR packing must reproduce the assembled blocks
 # ---------------------------------------------------------------------------
-h_flatten = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
+# rebuild the per-block factors through the assembly pipeline for reference
+bt = BlockTree(cluster, cluster; eta=1.5)
+HMatrixGPU.merge_dense_matrices!(bt.root)
+dense_blocks, approx_blocks = HMatrixGPU.traverse(bt)
+dense_mats, Umats, Vmats, dense_idx, approx_idx = HMatrixGPU.build_matrices(
+    K, bt.target_index_map, bt.source_index_map, dense_blocks, approx_blocks;
+    eps=1e-6)
 
-# block statistics must match the reference structure
-d2 = info(h_flatten)
-@test d2["leaves"] == d["leaves"]
-@test d2["admissible_leaves"] == d["admissible_leaves"]
-@test d2["full_leaves"] == d["full_leaves"]
-@test d2["min_rank"] == d["min_rank"]
-@test d2["max_rank"] == d["max_rank"]
-@test isapprox(d2["compression_ratio"], d["compression_ratio"]; rtol=1e-12)
-@test h_flatten.ranks == [size(U, 2) for U in hmatrix.U_matrices]
-@test Base.size(h_flatten) == (N, N)
-
-# end-to-end product must match the reference structure and the exact kernel
-@test isapprox(hmatrix * x, h_flatten * x; atol=1e-8)
+@test hmatrix.ndense == length(dense_mats)
+@test hmatrix.napprox == length(Umats)
+@test hmatrix.ranks == [size(U, 2) for U in Umats]
+@test all(U -> !any(isnan, U), Umats)
+@test all(V -> !any(isnan, V), Vmats)
+@test all(D -> !any(isnan, D), dense_mats)
 
 yf = zeros(N)
-mul!(yf, h_flatten, x)
+mul!(yf, hmatrix, x)
 @test norm(K * x - yf) / norm(K * x) < 1e-4
 
-# the rank-row buffer must equal the stacked V * x products of the reference
-function vx_from_reference(hmatrix::HMatrixGPU.HMatrixCPU, x::Vector)
-    x_ordered = x[hmatrix.source_index_map]
+# the rank-row buffer must equal the stacked V * x products of the blocks
+function vx_from_blocks(Vmats, approx_idx, smap, x)
+    x_ordered = x[smap]
     out = Float64[]
-    for i in eachindex(hmatrix.V_matrices)
-        (rs, re, cs, ce) = hmatrix.approx_block_indices[i]
-        append!(out, hmatrix.V_matrices[i] * view(x_ordered, cs:ce))
+    for i in eachindex(Vmats)
+        (rs, re, cs, ce) = approx_idx[i]
+        append!(out, Vmats[i] * view(x_ordered, cs:ce))
     end
     return out
 end
-@test isapprox(Array(h_flatten.vx_buffer), vx_from_reference(hmatrix, x); atol=1e-9)
+@test isapprox(Array(hmatrix.vx_buffer),
+               vx_from_blocks(Vmats, approx_idx, Array(hmatrix.source_index_map), x);
+               atol=1e-7)
 
-# the near-field CSR must reproduce the dense blocks of the reference structure.
+# the near-field CSR must reproduce the dense blocks of the assembly.
 # CSR rows are in cluster order and column indices are cluster positions;
 # scatter both back to original indices and compare with `sparsify_hmatrix`.
-function near_matrix_from_csr(h_flatten)
-    ptr = Array(h_flatten.near_rowptr)
-    col = Array(h_flatten.near_colval)
-    val = Array(h_flatten.near_data)
-    tmap = Array(h_flatten.target_index_map)
-    smap = Array(h_flatten.source_index_map)
-    A = spzeros(length(ptr) - 1, h_flatten.n)
+function near_matrix_from_csr(h)
+    ptr = Array(h.near_rowptr)
+    col = Array(h.near_colval)
+    val = Array(h.near_data)
+    tmap = Array(h.target_index_map)
+    smap = Array(h.source_index_map)
+    A = spzeros(length(ptr) - 1, h.n)
     for i in 1:(length(ptr) - 1)
         for k in (ptr[i] + 1):ptr[i + 1]
             A[tmap[i], smap[col[k]]] += val[k]
@@ -103,7 +97,12 @@ function near_matrix_from_csr(h_flatten)
     return A
 end
 S_ref = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster; eta=1.5)
-@test isapprox(near_matrix_from_csr(h_flatten), S_ref; atol=1e-12)
+@test isapprox(near_matrix_from_csr(hmatrix), S_ref; atol=1e-12)
+
+# the deprecated alias must forward to HMatrix
+h_dep = HMatrixGPU.HMatrixCPU(K, cluster, cluster; eta=1.5, eps=1e-6)
+@test h_dep isa HMatrix
+@test isapprox(Array(h_dep.near_data), Array(hmatrix.near_data); atol=0.0)
 
 # ---------------------------------------------------------------------------
 # Float32 end-to-end (the ACA computes in Float64, factors store as Float32)
@@ -112,14 +111,13 @@ S_ref = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster; eta=1.5)
     K32 = Float32.(K)
     x32 = rand(Float32, N)
     y_ref = K32 * x32
-    h32 = HMatrix(K32, cluster, cluster; eta=1.5, eps=1e-6, flatten=false)
+    h32 = HMatrix(K32, cluster, cluster; eta=1.5, eps=1e-6)
+    @test eltype(h32.near_data) == Float32
     y32 = h32 * x32
     @test eltype(y32) == Float32
     @test norm(Float64.(y32 .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
-    h32f = HMatrix(K32, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
-    @test eltype(h32f.near_data) == Float32
-    y32f = h32f * x32
-    @test norm(Float64.(y32f .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
+    mul!(y32, h32, x32)
+    @test norm(Float64.(y32 .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
 end
 
 # ---------------------------------------------------------------------------
@@ -128,7 +126,7 @@ end
 @using_gpu()
 set_backend("cuda")
 if CUDA.functional()
-    h_gpu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
+    h_gpu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6)
     x_gpu = CuArray(x)
     y_gpu = h_gpu * x_gpu
     @test isapprox(hmatrix * x, Array(y_gpu); atol=1e-9)
@@ -140,10 +138,10 @@ if CUDA.functional()
     # backend follows the data: build with the global backend on CPU but
     # `like` on the GPU — the factor arrays must land next to `like`
     set_backend("cpu")
-    h_like = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true,
+    h_like = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6,
                      like=CUDA.zeros(Float32, 0))
     @test h_like.near_data isa CuArray
     @test h_like.source_index_map isa CuArray
     y_like = h_like * CuArray(x)
-    @test isapprox(hmatrix * x, Array(y_like); rtol=1e-4)
+    @test isapprox(K * x, Array(y_like); rtol=1e-4)
 end

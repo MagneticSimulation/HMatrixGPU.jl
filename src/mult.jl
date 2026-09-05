@@ -2,52 +2,6 @@
 import Base: *
 import LinearAlgebra: mul!
 
-"""
-    mul!(result::Vector, hmatrix::HMatrixCPU, x::Vector)
-
-In-place matrix-vector multiplication `result = hmatrix * x` for the CPU
-reference structure `HMatrixCPU`. `result` is fully overwritten.
-"""
-function mul!(result::Vector, hmatrix::HMatrixCPU, x::Vector)
-    fill!(result, 0)
-
-    # Reorder x based on source index mapping to avoid repeated indexing in loops
-    x_ordered = x[hmatrix.source_index_map]
-
-    # Process dense blocks
-    for i in 1:length(hmatrix.dense_blocks)
-        (row_start, row_end, col_start, col_end) = hmatrix.dense_block_indices[i]
-        dense_block = hmatrix.dense_blocks[i]
-
-        result[row_start:row_end] .+= dense_block * view(x_ordered, col_start:col_end)
-    end
-
-    # Process approximate (low-rank) blocks
-    for i in 1:length(hmatrix.U_matrices)
-        (row_start, row_end, col_start, col_end) = hmatrix.approx_block_indices[i]
-        U = hmatrix.U_matrices[i]
-        V = hmatrix.V_matrices[i]
-
-        result[row_start:row_end] .+= U * (V * view(x_ordered, col_start:col_end))
-    end
-
-    # Reorder result according to target index map
-    result[hmatrix.target_index_map] .= result
-    return result
-end
-
-"""
-    *(hmatrix::HMatrixCPU, x::Vector)
-
-Matrix-vector multiplication for the CPU reference structure `HMatrixCPU`,
-returning a freshly allocated result vector.
-"""
-function *(hmatrix::HMatrixCPU, x::Vector)
-    result = zeros(eltype(x), size(hmatrix.K, 1))
-    mul!(result, hmatrix, x)
-    return result
-end
-
 # ---------------------------------------------------------------------------
 # Backend kernels for the CSR-compressed HMatrix.
 #

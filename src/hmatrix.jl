@@ -1,43 +1,19 @@
 using SparseArrays
 
 """
-    mutable struct HMatrixCPU
-
-Hierarchical matrix used for testing and validation.
-
-# Fields
-- `K::AbstractMatrix`: The matrix for which the hierarchical block structure is constructed.
-- `target_index_map::Vector{Int}`: Mapping of target indices for reordering.
-- `source_index_map::Vector{Int}`: Mapping of source indices for reordering.
-- `dense_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of dense blocks.
-- `approx_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of low-rank approximated blocks.
-- `dense_blocks::Vector{Matrix}`: Dense matrix blocks from direct interactions.
-- `U_matrices::Vector{Matrix}`: Low-rank approximated U matrices.
-- `V_matrices::Vector{Matrix}`: Low-rank approximated V matrices.
-"""
-mutable struct HMatrixCPU
-    K::AbstractMatrix                       # Original matrix for hierarchical decomposition
-    target_index_map::Vector{Int}           # Index map for target reordering
-    source_index_map::Vector{Int}           # Index map for source reordering
-    dense_block_indices::Vector{Tuple{Int,Int,Int,Int}}  # Dense block indices
-    approx_block_indices::Vector{Tuple{Int,Int,Int,Int}} # Low-rank block indices
-    dense_blocks::Vector{Matrix}            # Dense interaction blocks
-    U_matrices::Vector{Matrix}              # Low-rank U matrices
-    V_matrices::Vector{Matrix}              # Low-rank V matrices
-end
-
-"""
     mutable struct HMatrix
 
 Hierarchical matrix stored as three CSR-compressed operators on the active
 backend (CPU, CUDA, AMDGPU, oneAPI or Metal via KernelAbstractions). The
-matrix-vector product runs as two thread-per-row kernels without shared
+matrix-vector product runs as three thread-group kernels without shared
 memory, barriers or atomics:
 
-1. `vx = V * x`                — one thread per rank row of the far field,
-2. `y = (D + U) * [x; vx]`     — one thread per matrix row (cluster order),
-   scattering through `target_index_map` (each output entry is written
-   exactly once, so no atomics are needed).
+1. `xord = x[source_index_map]` — the input vector permuted into cluster order,
+2. `vx = V * xord`                — one workgroup per rank row of the far field,
+3. `y[tmap[i]] = (D + U) * [xord; vx]` — one workgroup per matrix row.
+
+Since the near-field and `U` row sets partition the matrix rows and the target
+index map is a permutation, every entry of `y` is written exactly once.
 
 # Fields
 - `m::Int`, `n::Int`: dimensions of the full matrix.
@@ -46,15 +22,13 @@ memory, barriers or atomics:
 - `source_index_map::AbstractVector{Int}`: permutation from cluster-ordered
   columns to original column indices.
 - `near_rowptr/near_colval/near_data`: CSR of the near-field (dense) blocks.
-  Column indices are already mapped through `source_index_map`.
-- `v_rowptr/v_colval/v_data`: CSR of the far-field `V` factors. One row per
-  rank row of every admissible block; column indices already mapped.
-- `u_rowptr/u_colval/u_data`: CSR of the far-field `U` factors. Rows in
-  cluster order; column indices address the `vx` buffer of rank rows.
-- `vx_buffer::AbstractVector{T}`: intermediate buffer of length `L` (total
-  number of rank rows).
-- `x_buffer::AbstractVector{T}`: the input vector permuted into cluster order
-  (length `n`), so that all kernel accesses to `x` are sequential.
+  Column indices are cluster positions (`Int32`).
+- `v_rowptr/v_colval/v_data`: CSR of the far-field `V` factors, one row per
+  rank row of every admissible block.
+- `u_rowptr/u_colval/u_data`: CSR of the far-field `U` factors, rows in
+  cluster order; column indices address the `vx` buffer.
+- `vx_buffer::AbstractVector{T}`: intermediate buffer (length = total rank rows).
+- `x_buffer::AbstractVector{T}`: input vector permuted into cluster order.
 - `ranks::Vector{Int}`: rank of each admissible block (host side, for `info`).
 - `ndense::Int`, `napprox::Int`: number of near-field and far-field blocks.
 """
@@ -82,8 +56,19 @@ end
 Base.size(h::HMatrix) = (h.m, h.n)
 
 """
+    HMatrixCPU(args...; kwargs...)
+
+Deprecated alias for [`HMatrix`](@ref): the hierarchical matrix is now a single
+backend-resident CSR structure that works on the CPU as well as on GPUs.
+"""
+function HMatrixCPU(args...; kwargs...)
+    Base.depwarn("`HMatrixCPU` is deprecated, use `HMatrix`", :HMatrixCPU)
+    return HMatrix(args...; kwargs...)
+end
+
+"""
     HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
-            flatten=true, index_map_using_cpu=true, svd_recompress=true)
+            index_map_using_cpu=true, svd_recompress=true)
 
 Creates a hierarchical matrix (`HMatrix`) from a given matrix `K` and two cluster
 trees `X` and `Y`.
@@ -95,8 +80,9 @@ trees `X` and `Y`.
 - `Y::ClusterTree`: Cluster tree representing the source partitioning.
 - `eta::Float64`: Admissibility parameter controlling the low-rank approximation.
 - `eps::Float64`: Tolerance level for approximation error.
-- `flatten::Bool`: If `true` (default), build the backend-resident CSR structure
-  used by the GPU kernels; if `false`, build a CPU reference `HMatrixCPU`.
+- The compressed structure is backend-resident: on `set_backend("cpu")` all
+  factor arrays are ordinary CPU arrays (the same kernels run on the CPU), on
+  a GPU backend they are device arrays.
 - `index_map_using_cpu`: Keep the cluster index maps on the CPU during tree
   construction (default; almost always the right choice).
 - `svd_recompress`: Recompress the ACA factors with a truncated SVD (default).
@@ -105,7 +91,7 @@ trees `X` and `Y`.
   global default backend.
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
-                 flatten=true, index_map_using_cpu=true, svd_recompress=true,
+                 index_map_using_cpu=true, svd_recompress=true,
                  row_block_size=1, col_block_size=1, like=nothing)
     block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
     merge_dense_matrices!(block_tree.root)
@@ -123,12 +109,6 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                                                                                                        svd_recompress=svd_recompress,
                                                                                                        row_block=row_block_size,
                                                                                                        col_block=col_block_size)
-
-    # Return CPU-based structure if flatten is false
-    if !flatten
-        return HMatrixCPU(K, X.index_map, Y.index_map, dense_block_indices,
-                          approx_block_indices, dense_matrices, U_matrices, V_matrices)
-    end
 
     target_map = collect(Int, block_tree.target_index_map)
     source_map = collect(Int, block_tree.source_index_map)
@@ -408,61 +388,6 @@ function sparsify_hmatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta
     return sparse_matrix
 end
 
-
-"""
-    info(hmatrix::HMatrixCPU) -> Dict
-
-Returns information about the `HMatrixCPU` object, including matrix size, ranks,
-and the compression ratio.
-
-# Arguments
-- `hmatrix::HMatrixCPU`: The hierarchical matrix object to analyze.
-
-# Output
-Returns a dictionary with information about the hierarchical matrix.
-"""
-function info(hmatrix::HMatrixCPU)
-    # Basic matrix information
-    n_rows, n_cols = size(hmatrix.K)
-    data_type = eltype(hmatrix.K)
-
-    # Tree statistics
-    num_dense_leaves = length(hmatrix.dense_blocks)
-    num_approx_leaves = length(hmatrix.U_matrices)
-    num_leaves = num_dense_leaves + num_approx_leaves
-
-    # Sparse block rank statistics
-    ranks = [size(U, 2) for U in hmatrix.U_matrices]
-    if length(ranks) == 0
-        min_rank = 0
-        max_rank = 0
-    else
-        min_rank = minimum(ranks)
-        max_rank = maximum(ranks)
-    end
-
-    # Dense block size statistics
-    dense_sizes = [length(block) for block in hmatrix.dense_blocks]
-    min_dense_size = minimum(dense_sizes)
-    max_dense_size = maximum(dense_sizes)
-
-    # Leaf size statistics (number of elements per leaf)
-    U_sizes = [size(U, 1) * size(U, 2) for U in hmatrix.U_matrices]
-    V_sizes = [size(V, 1) * size(V, 2) for V in hmatrix.V_matrices]
-
-    # Compression ratio calculation
-    original_size = n_rows * n_cols
-    compressed_size = sum(U_sizes) + sum(V_sizes) + sum(dense_sizes)
-    compression_ratio = original_size / compressed_size
-
-    # Return dictionary of information
-    return Dict("data_type" => data_type, "size" => (n_rows, n_cols),
-                "leaves" => num_leaves, "admissible_leaves" => num_approx_leaves,
-                "full_leaves" => num_dense_leaves, "min_rank" => min_rank,
-                "max_rank" => max_rank, "min_dense_size" => min_dense_size,
-                "max_dense_size" => max_dense_size,
-                "compression_ratio" => compression_ratio)
-end
 
 """
     info(hmatrix::HMatrix) -> Dict
