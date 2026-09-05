@@ -55,6 +55,12 @@ end
 
 Base.size(h::HMatrix) = (h.m, h.n)
 
+# GPU batched dense-K assembly: implemented by package extensions (CUDAExt).
+# When unavailable (or for matrix-free kernels) the CPU ACA path is used.
+function build_matrices_gpu_dense end
+# per-backend capability: implemented by the package extensions (CUDAExt)
+gpu_dense_assembly_available(::KernelAbstractions.Backend) = false
+
 """
     HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
             index_map_using_cpu=true, svd_recompress=true)
@@ -93,7 +99,35 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
     # Traverse the block tree to gather dense and approximated blocks
     dense_blocks, approx_blocks = traverse(block_tree)
 
-    # Build the block matrices and indices
+    target_map = collect(Int, block_tree.target_index_map)
+    source_map = collect(Int, block_tree.source_index_map)
+    (like !== nothing && backend !== nothing) &&
+        error("specify either `like` or `backend`, not both")
+
+    # resolve the landing backend
+    B = like !== nothing ? KernelAbstractions.get_backend(like) :
+        backend === nothing ? default_backend[] :
+        backend isa KernelAbstractions.Backend ? backend :
+        _backend_from_name(string(backend))
+
+    # GPU batched fast path: dense kernels on a GPU backend (implemented in
+    # CUDAExt). Matrix-free kernels and CPU backends use the CPU ACA path;
+    # row_block_size/col_block_size only apply to the CPU path (the GPU
+    # randomized SVD needs no grouped pivoting).
+    if !(B isa KernelAbstractions.CPU) && gpu_dense_assembly_available(B) &&
+       K isa DenseMatrix
+        dense_matrices, U_matrices, V_matrices, dense_block_indices,
+        approx_block_indices = build_matrices_gpu_dense(
+            Matrix(K), B, block_tree.target_index_map, block_tree.source_index_map,
+            dense_blocks, approx_blocks; eps=eps)
+        return build_csr_hmatrix(eltype(K), size(K, 1), size(K, 2),
+                                 target_map, source_map,
+                                 dense_matrices, dense_block_indices,
+                                 U_matrices, V_matrices, approx_block_indices;
+                                 backend=B)
+    end
+
+    # CPU path: grouped ACA+ per block (threaded), then CSR packing
     dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices = build_matrices(K,
                                                                                                        block_tree.target_index_map,
                                                                                                        block_tree.source_index_map,
@@ -104,16 +138,11 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                                                                                                        row_block=row_block_size,
                                                                                                        col_block=col_block_size)
 
-    target_map = collect(Int, block_tree.target_index_map)
-    source_map = collect(Int, block_tree.source_index_map)
-    (like !== nothing && backend !== nothing) &&
-        error("specify either `like` or `backend`, not both")
-
     return build_csr_hmatrix(eltype(K), size(K, 1), size(K, 2),
                              target_map, source_map,
                              dense_matrices, dense_block_indices,
                              U_matrices, V_matrices, approx_block_indices;
-                             backend=backend, like=like)
+                             backend=B)
 end
 
 """
@@ -127,9 +156,9 @@ the kernels read the input vector `x` in its original ordering directly.
 """
 function build_csr_hmatrix(::Type{T}, m::Int, n::Int,
                            target_map::Vector{Int}, source_map::Vector{Int},
-                           dense_matrices::Vector{Matrix},
+                           dense_matrices::Vector{<:Matrix},
                            dense_block_indices::Vector{Tuple{Int,Int,Int,Int}},
-                           U_matrices::Vector{Matrix}, V_matrices::Vector{Matrix},
+                           U_matrices::Vector{<:Matrix}, V_matrices::Vector{<:Matrix},
                            approx_block_indices::Vector{Tuple{Int,Int,Int,Int}};
                            backend=nothing, like=nothing) where {T}
     # landing backend: follows `like` when given (backend follows the data),
