@@ -70,9 +70,19 @@ end
 function build_tree_node(coordinates::Matrix{Float64}, max_points_per_leaf::Int,
                          index_map::Vector{Int}, start_idx::Int, end_idx::Int)
 
+    # Return if this is a leaf node (checked before anything else: an empty
+    # or too-small cluster must never reach the bounding-box computation)
+    if end_idx - start_idx <= max_points_per_leaf
+        center, radius = cluster_center_radius(coordinates, index_map,
+                                               start_idx, end_idx)
+        node = ClusterNode(true, start_idx, end_idx, vec(center), radius,
+                           nothing, nothing)
+        return node
+    end
+
     # View the portion of index_map corresponding to the current node
     idx_view = view(index_map, start_idx:(end_idx - 1))
-    points = coordinates[:, idx_view]
+    points = @view coordinates[:, idx_view]
 
     # Calculate bounding box parameters
     min_coords = minimum(points; dims=2)
@@ -86,15 +96,19 @@ function build_tree_node(coordinates::Matrix{Float64}, max_points_per_leaf::Int,
     radius = norm(center .- max_coords)
     radius = max(radius, norm(center .- min_coords))
 
-    # Return if this is a leaf node
-    if end_idx - start_idx <= max_points_per_leaf
-        node = ClusterNode(true, start_idx, end_idx, vec(center), radius, nothing, nothing)
+    # Split along the longest axis at the bounding-box midpoint (standard
+    # geometric bisection): both halves are non-empty whenever the box has
+    # non-zero extent on the split axis
+    midpoint = (max_coords[longest_axis] + min_coords[longest_axis]) / 2
+    split_dimension_values = points[longest_axis, :]
+    is_left_partition = split_dimension_values .< midpoint
+
+    # all points identical (zero extent on every axis): cannot subdivide
+    if !any(is_left_partition) || all(is_left_partition)
+        node = ClusterNode(true, start_idx, end_idx, vec(center), radius,
+                           nothing, nothing)
         return node
     end
-
-    # Split along the longest axis for non-leaf nodes
-    split_dimension_values = points[longest_axis, :]
-    is_left_partition = split_dimension_values .< center[longest_axis]
 
     # Re-arrange indices for left and right partitions
     left_indices = idx_view[findall(is_left_partition)]
@@ -184,4 +198,13 @@ function info(tree::ClusterTree)
     # Prepare the result as a dictionary
     return Dict(:depth => depths, :max_points => max_points,
                 :min_points => min_points == Inf ? 0 : Int(min_points))
+end
+
+# center and radius of the cluster holding index_map[start_idx:end_idx-1]
+function cluster_center_radius(coordinates, index_map, start_idx, end_idx)
+    points = @view coordinates[:, view(index_map, start_idx:(end_idx - 1))]
+    center = vec(sum(points; dims=2) / size(points, 2))
+    radius = norm(center .- vec(maximum(points; dims=2)))
+    radius = max(radius, norm(center .- vec(minimum(points; dims=2))))
+    return center, radius
 end
