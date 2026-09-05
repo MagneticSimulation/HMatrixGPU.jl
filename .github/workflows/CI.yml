@@ -40,6 +40,43 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  examples:
+    name: Examples - Julia ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.10'
+        os:
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+      - uses: actions/cache@v4
+        env:
+          cache-name: cache-artifacts
+        with:
+          path: ~/.julia/artifacts
+          key: ${{ runner.os }}-examples-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-examples-${{ env.cache-name }}-
+            ${{ runner.os }}-examples-
+            ${{ runner.os }}-
+      - uses: julia-actions/julia-buildpkg@v1
+      # every example validates itself against the exact kernel and exits
+      # non-zero on failure; the GPU sections are skipped on the CPU-only
+      # runner. Sizes are half the script defaults to keep the job short.
+      - name: Run application examples
+        run: |
+          julia --project=. --color=yes examples/scalar_laplace2d.jl 2000
+          julia --project=. --color=yes examples/scalar_laplace3d.jl 2000
+          julia --project=. --color=yes examples/covariance_gaussian.jl 2000
+          julia --project=. --color=yes examples/vector_demag.jl 1000
+          julia --project=. --color=yes examples/hmatrix_vector.jl 1000
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest
