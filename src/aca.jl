@@ -6,41 +6,6 @@ using Random
 # demagnetization tensor, pivot one group of DOFs at a time).
 
 """
-    argmax_not_in_list(arr, disallowed)
-
-Finds the index of the maximum element in `arr` that is not in `disallowed`.
-If all indices are disallowed, returns -1.
-"""
-function argmax_not_in_list(arr, disallowed)
-    sorted_indices = sortperm(arr; rev=true)  # Sort indices by value in descending order
-    for idx in sorted_indices
-        if !(idx in disallowed)
-            return idx  # Return the first index not in disallowed list
-        end
-    end
-    return -1  # No valid index found
-end
-
-"""
-    argmax_skip(v, used, dead, tol)
-
-Index of the largest entry of `v` among indices that are neither in `used`
-nor marked `dead`, provided its magnitude exceeds `tol`; -1 if none.
-"""
-function argmax_skip(v, used, dead, tol)
-    best = -1
-    bestv = tol
-    for i in eachindex(v)
-        (dead[i] || (i in used)) && continue
-        if abs(v[i]) > bestv
-            bestv = abs(v[i])
-            best = i
-        end
-    end
-    return best
-end
-
-"""
     ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows, max_rank=0,
              pivot_tol=1e-13, row_block=1, col_block=1)
 

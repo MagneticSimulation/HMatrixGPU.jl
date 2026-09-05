@@ -251,24 +251,32 @@ function build_csr_hmatrix(::Type{T}, m::Int, n::Int,
 end
 
 """
-    build_matrices(K::AbstractMatrix, target_index_map::Vector{Int}, source_index_map::Vector{Int},
-                   dense_blocks::Vector, approx_blocks::Vector; eps=1e-5)
+    build_matrices(K, target_index_map, source_index_map, dense_blocks,
+                   approx_blocks; eps=1e-5, svd_recompress=true,
+                   row_block=1, col_block=1)
 
-Builds dense and low-rank approximated matrices from `K` based on block structures.
+Extracts near-field blocks and factorizes far-field blocks of `K`, following
+the block structure given by the block tree traversal.
+
+The cross approximation always computes in `Float64` (the queries are
+converted); the returned factors are converted to `eltype(K)`. Blocks whose
+approximation did not converge within the storage-crossover rank are returned
+with `converged = false` and must be stored densely by the caller.
 
 # Arguments
-- `K::AbstractMatrix`: Original matrix from which the blocks are extracted.
-- `target_index_map::Vector{Int}`: Index map for target reordering.
-- `source_index_map::Vector{Int}`: Index map for source reordering.
-- `dense_blocks::Vector`: List of dense block pairs from direct interactions.
-- `approx_blocks::Vector`: List of low-rank approximable block pairs.
-- `eps::Float64`: Tolerance level for approximation error.
+- `K::AbstractMatrix`: Original matrix (may be matrix-free; only batched
+  `getindex` queries are used).
+- `target_index_map`, `source_index_map`: cluster-order to original-DOF maps.
+- `dense_blocks`, `approx_blocks`: near/far block pairs from the block tree.
+- `eps`: Relative tolerance for the approximation.
+- `svd_recompress`: Truncate the ACA factors with a relative SVD (default).
+- `row_block`, `col_block`: Group sizes for block pivoting (DOFs per point).
 
 # Returns
-- `dense_matrices::Vector{Matrix}`: Dense blocks extracted from `K`.
-- `approx_matrices::Vector{Tuple{Matrix, Matrix}}`: Low-rank (U, V) approximation matrices for blocks.
-- `dense_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of dense blocks.
-- `approx_block_indices::Vector{Tuple{Int, Int, Int, Int}}`: Indices of approximated blocks.
+- `dense_matrices::Vector{Matrix}`: Near-field blocks extracted from `K`.
+- `U_matrices::Vector{Matrix}`, `V_matrices::Vector{Matrix}`: Low-rank factors.
+- `dense_block_indices`, `approx_block_indices`: `(rows, cols)` ranges of the
+  kept blocks, in cluster-order indices (end-inclusive).
 """
 function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
                         source_index_map::AbstractArray{Int}, dense_blocks::Vector,
