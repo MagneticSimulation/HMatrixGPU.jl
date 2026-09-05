@@ -34,10 +34,15 @@ HMatrixGPU.gpu_dense_assembly_available(::CUDA.CUDABackend) = CUDA.functional()
 
 Batched GPU assembly of the far field for a *dense* kernel `K_cpu`: the whole
 matrix is uploaded to the device once, every far block is evaluated by a
-device gather and factorized with a randomized SVD (Halko et al.; the
-"randomized range approximation" of Dölz et al.). Blocks whose ε-rank exceeds
-the storage crossover `m*n/(m+n)` are reported as dense (they stay in the
-near field). All heavy operations are device-side GEMMs and cuSOLVER calls.
+device gather and factorized with a single-sided randomized SVD (Halko et al.;
+the "randomized range approximation" of Dölz et al.) — one device SVD per
+block; the range basis comes from the small Gram matrix of the test
+projection, orthogonalized twice (CholeskyQR2-style). The test matrix `Ω` is
+seeded per block, so repeated assemblies of the same matrix are bitwise
+identical. Blocks whose ε-rank exceeds the storage crossover `m*n/(m+n)` are
+reported as dense (they stay in the near field); numerically zero blocks are
+dropped (their rows stay covered by the near/U partition). All heavy
+operations are device-side GEMMs and cuSOLVER calls.
 
 The randomized SVD needs no grouped pivoting and is immune to component
 anisotropy, so `row_block_size`/`col_block_size` are not used on this path.
@@ -45,10 +50,13 @@ anisotropy, so `row_block_size`/`col_block_size` are not used on this path.
 # Returns
 - `K_gpu`: the uploaded matrix (used by the packing for the near field).
 - `dense_block_indices`: near-field blocks plus the high-rank far blocks.
-- `U_factors`, `V_factors`: device factors of the low-rank blocks.
+- `U_factors`: `m × r` device left factors of the low-rank blocks.
+- `V_factors`: `n × r` device views of the right SVD factors (column j = rank
+  row j, the far-CSR row order).
+- `ranks`: the truncated rank of each low-rank block.
 - `approx_block_indices`: cluster ranges of the low-rank blocks.
 """
-function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix{Float64},
+function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
                                              backend::KernelAbstractions.Backend,
                                              target_index_map::Vector{Int},
                                              source_index_map::Vector{Int},

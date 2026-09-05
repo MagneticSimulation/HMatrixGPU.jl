@@ -88,11 +88,24 @@ trees `X` and `Y`.
   was detected.
 - `like::Union{Nothing,AbstractArray}`: alternative to `backend` — move all
   factor arrays to the backend where `like` lives (backend follows the data).
+
+# Contracts
+- The device is fixed at construction: `like=` takes precedence over
+  `backend=`, which takes precedence over the global `set_backend`; the
+  global backend only affects constructions made after it is set.
+- `mul!`/`*` require `x` (and `result`) to live on the same backend as the
+  matrix; cross-device inputs error out instead of being moved.
+- A dense `K` with a CUDA backend assembles on the GPU fast path, which
+  ignores `svd_recompress`/`row_block_size`/`col_block_size` (the randomized
+  SVD truncates optimally without grouped pivoting).
+- Complex-valued kernels are not supported (the constructor errors).
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
                  index_map_using_cpu=true, svd_recompress=true,
                  row_block_size=1, col_block_size=1,
                  backend=nothing, like=nothing)
+    eltype(K) <: Complex &&
+        error("HMatrix does not support complex-valued kernels (eltype(K) = $(eltype(K)))")
     block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
     merge_dense_matrices!(block_tree.root)
 
