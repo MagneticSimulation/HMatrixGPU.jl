@@ -26,26 +26,94 @@ end
 K = MyCustomMatrix(pts, pts)
 
 cluster = ClusterTree(pts; max_points_per_leaf=64)
+
+# ---------------------------------------------------------------------------
+# build + matvec, run on every available backend via test_functions
+# ---------------------------------------------------------------------------
+function test_hmatrix_matvec()
+    hmatrix = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6)
+
+    d = info(hmatrix)
+    @test d["compression_ratio"] > 3
+    @test d["leaves"] == d["admissible_leaves"] + d["full_leaves"]
+    @test Base.size(hmatrix) == (N, N)
+    @test !any(isnan, Array(hmatrix.near_data))
+    @test !any(isnan, Array(hmatrix.v_data))
+    @test !any(isnan, Array(hmatrix.u_data))
+
+    x = rand(N)
+    xd = HMatrixGPU.create_zeros(Float64, N)
+    copyto!(xd, x)
+    @test norm(K * x - Array(hmatrix * xd)) / norm(K * x) < 1e-4
+
+    y = HMatrixGPU.create_zeros(Float64, N)
+    mul!(y, hmatrix, xd)
+    @test norm(K * x - Array(y)) / norm(K * x) < 1e-4
+end
+
+# backend follows the data: build with the global backend on CPU but `like`
+# on the active backend — the factor arrays must land next to `like`
+function test_backend_following_data()
+    set_backend("cpu")
+    like = HMatrixGPU.create_zeros(Float32, 0)
+    h_like = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, like=like)
+    @test nameof(typeof(h_like.near_data)) == nameof(typeof(like))
+    @test nameof(typeof(h_like.source_index_map)) == nameof(typeof(like))
+
+    x = rand(N)
+    y = h_like * HMatrixGPU.to_backend(like, x)
+    @test isapprox(K * x, Array(y); rtol=1e-4)
+end
+
+test_functions("HMatrix", test_hmatrix_matvec, test_backend_following_data)
+
+function test_float32_end_to_end()
+    K32 = Float32.(K)
+    x32 = rand(Float32, N)
+    y_ref = K32 * x32
+
+    h32 = HMatrix(K32, cluster, cluster; eta=1.5, eps=1e-6)
+    @test eltype(h32.near_data) == Float32
+
+    x32d = HMatrixGPU.create_zeros(Float32, N)
+    copyto!(x32d, x32)
+    y32 = Array(h32 * x32d)
+    @test eltype(y32) == Float32
+    @test norm(Float64.(y32 .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
+
+    y32d = HMatrixGPU.create_zeros(Float32, N)
+    mul!(y32d, h32, x32d)
+    @test norm(Float64.(Array(y32d) .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
+end
+
+function test_backend_keyword()
+    x = rand(N)             # own vector: file-scope x is shadowed by other files
+    @test_throws ErrorException HMatrix(K, cluster, cluster;
+                                        backend="nonsense")
+
+    set_backend("cuda")     # warns and stays CPU where no GPU is available
+    h_cpu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, backend="cpu")
+    @test h_cpu.near_data isa Array
+
+    if CUDA.functional()
+        h_cu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, backend="cuda")
+        @test h_cu.near_data isa CuArray
+        x_cu = CuArray(x)
+        @test isapprox(h_cpu * x, Array(h_cu * x_cu); rtol=1e-4)
+    end
+    set_backend("cpu")
+end
+test_functions("backend keyword", test_backend_keyword)
+
+test_functions("Float32 end-to-end", test_float32_end_to_end)
+
+# ---------------------------------------------------------------------------
+# CPU-only checks: the CSR packing must reproduce the assembled blocks
+# ---------------------------------------------------------------------------
+set_backend("cpu")
 hmatrix = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6)
-
-d = info(hmatrix)
-
-@test d["compression_ratio"] > 3
-@test d["leaves"] == d["admissible_leaves"] + d["full_leaves"]
-@test Base.size(hmatrix) == (N, N)
-@test !any(isnan, Array(hmatrix.near_data))
-@test !any(isnan, Array(hmatrix.v_data))
-@test !any(isnan, Array(hmatrix.u_data))
-
 x = rand(N)
-y = rand(N)
-mul!(y, hmatrix, x)
-@test norm(K * x - hmatrix * x) / norm(K * x) < 1e-4
-@test norm(K * x - y) / norm(K * x) < 1e-4
 
-# ---------------------------------------------------------------------------
-# the CSR packing must reproduce the assembled blocks
-# ---------------------------------------------------------------------------
 # rebuild the per-block factors through the assembly pipeline for reference
 bt = BlockTree(cluster, cluster; eta=1.5)
 HMatrixGPU.merge_dense_matrices!(bt.root)
@@ -98,50 +166,3 @@ function near_matrix_from_csr(h)
 end
 S_ref = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster; eta=1.5)
 @test isapprox(near_matrix_from_csr(hmatrix), S_ref; atol=1e-12)
-
-# the deprecated alias must forward to HMatrix
-h_dep = HMatrixGPU.HMatrixCPU(K, cluster, cluster; eta=1.5, eps=1e-6)
-@test h_dep isa HMatrix
-@test isapprox(Array(h_dep.near_data), Array(hmatrix.near_data); atol=0.0)
-
-# ---------------------------------------------------------------------------
-# Float32 end-to-end (the ACA computes in Float64, factors store as Float32)
-# ---------------------------------------------------------------------------
-@testset "Float32 end-to-end" begin
-    K32 = Float32.(K)
-    x32 = rand(Float32, N)
-    y_ref = K32 * x32
-    h32 = HMatrix(K32, cluster, cluster; eta=1.5, eps=1e-6)
-    @test eltype(h32.near_data) == Float32
-    y32 = h32 * x32
-    @test eltype(y32) == Float32
-    @test norm(Float64.(y32 .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
-    mul!(y32, h32, x32)
-    @test norm(Float64.(y32 .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
-end
-
-# ---------------------------------------------------------------------------
-# CUDA
-# ---------------------------------------------------------------------------
-@using_gpu()
-set_backend("cuda")
-if CUDA.functional()
-    h_gpu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6)
-    x_gpu = CuArray(x)
-    y_gpu = h_gpu * x_gpu
-    @test isapprox(hmatrix * x, Array(y_gpu); atol=1e-9)
-
-    y_gpu2 = CUDA.zeros(Float64, N)
-    mul!(y_gpu2, h_gpu, x_gpu)
-    @test norm(K * x - Array(y_gpu2)) / norm(K * x) < 1e-4
-
-    # backend follows the data: build with the global backend on CPU but
-    # `like` on the GPU — the factor arrays must land next to `like`
-    set_backend("cpu")
-    h_like = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6,
-                     like=CUDA.zeros(Float32, 0))
-    @test h_like.near_data isa CuArray
-    @test h_like.source_index_map isa CuArray
-    y_like = h_like * CuArray(x)
-    @test isapprox(K * x, Array(y_like); rtol=1e-4)
-end

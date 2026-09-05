@@ -119,6 +119,26 @@ AMDGPU/oneAPI/Metal).
 """
 to_backend(like::AbstractArray, a::AbstractArray) = a
 
+# resolve a backend given by name ("cpu", "cuda", "amd", "oneapi", "metal");
+# errors when the requested GPU package is not installed or not functional
+function _backend_from_name(name::AbstractString)
+    key = lowercase(name)
+    table = Dict("cpu" => 0, "cuda" => 1, "nvidia" => 1, "amd" => 2, "roc" => 2,
+                 "amdgpu" => 2, "oneapi" => 3, "intel" => 3, "metal" => 4,
+                 "apple" => 4)
+    haskey(table, key) ||
+        error("unknown backend `$(name)` (expected \"cpu\", \"cuda\", \"amd\", \"oneapi\" or \"metal\")")
+    id = table[key]
+    id == 0 && return CPU()
+    pkg = ("CUDA", "AMDGPU", "oneAPI", "Metal")[id]
+    Base.find_package(pkg) === nothing &&
+        error("backend \"$(name)\" requires $(pkg).jl, which is not installed")
+    b = all_backends[id]
+    b isa CPU && error("backend \"$(name)\" is not available: $(pkg).jl is loaded " *
+                       "but no functional GPU was detected")
+    return b
+end
+
 function kernel_array(a::Array)
     if default_backend[] == CPU()
         return a

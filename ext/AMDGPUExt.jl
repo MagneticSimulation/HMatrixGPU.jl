@@ -13,7 +13,8 @@ end
 HMatrixGPU.to_backend(like::ROCArray, a::AbstractArray) = a isa ROCArray ? a : ROCArray(a)
 
 function __init__()
-    return set_amd_backend()
+    AMDGPU.functional() && set_amd_backend()
+    return nothing
 end
 
 end

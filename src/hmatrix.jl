@@ -56,17 +56,6 @@ end
 Base.size(h::HMatrix) = (h.m, h.n)
 
 """
-    HMatrixCPU(args...; kwargs...)
-
-Deprecated alias for [`HMatrix`](@ref): the hierarchical matrix is now a single
-backend-resident CSR structure that works on the CPU as well as on GPUs.
-"""
-function HMatrixCPU(args...; kwargs...)
-    Base.depwarn("`HMatrixCPU` is deprecated, use `HMatrix`", :HMatrixCPU)
-    return HMatrix(args...; kwargs...)
-end
-
-"""
     HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
             index_map_using_cpu=true, svd_recompress=true)
 
@@ -86,13 +75,18 @@ trees `X` and `Y`.
 - `index_map_using_cpu`: Keep the cluster index maps on the CPU during tree
   construction (default; almost always the right choice).
 - `svd_recompress`: Recompress the ACA factors with a truncated SVD (default).
-- `like::Union{Nothing,AbstractArray}`: when given, all factor arrays are moved
-  to the backend where `like` lives (backend follows the data) instead of the
-  global default backend.
+- `backend`: where the factor arrays land — a name (`"cpu"`, `"cuda"`, `"amd"`,
+  `"oneapi"`, `"metal"`), a KernelAbstractions backend object, or `nothing`
+  (default: the global backend set with [`set_backend`](@ref)). Errors when a
+  GPU backend is requested but its package is not loaded or no functional GPU
+  was detected.
+- `like::Union{Nothing,AbstractArray}`: alternative to `backend` — move all
+  factor arrays to the backend where `like` lives (backend follows the data).
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
                  index_map_using_cpu=true, svd_recompress=true,
-                 row_block_size=1, col_block_size=1, like=nothing)
+                 row_block_size=1, col_block_size=1,
+                 backend=nothing, like=nothing)
     block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
     merge_dense_matrices!(block_tree.root)
 
@@ -112,11 +106,14 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
 
     target_map = collect(Int, block_tree.target_index_map)
     source_map = collect(Int, block_tree.source_index_map)
+    (like !== nothing && backend !== nothing) &&
+        error("specify either `like` or `backend`, not both")
+
     return build_csr_hmatrix(eltype(K), size(K, 1), size(K, 2),
                              target_map, source_map,
                              dense_matrices, dense_block_indices,
                              U_matrices, V_matrices, approx_block_indices;
-                             like=like)
+                             backend=backend, like=like)
 end
 
 """
@@ -134,12 +131,19 @@ function build_csr_hmatrix(::Type{T}, m::Int, n::Int,
                            dense_block_indices::Vector{Tuple{Int,Int,Int,Int}},
                            U_matrices::Vector{Matrix}, V_matrices::Vector{Matrix},
                            approx_block_indices::Vector{Tuple{Int,Int,Int,Int}};
-                           like=nothing) where {T}
-    # move an assembled host array to the landing backend: the backend of
-    # `like` when given (backend follows the data), the global default_backend
-    # otherwise
+                           backend=nothing, like=nothing) where {T}
+    # landing backend: follows `like` when given (backend follows the data),
+    # else the explicit `backend` keyword (name, backend object), else the
+    # global default_backend
+    B = like !== nothing ? KernelAbstractions.get_backend(like) :
+        backend === nothing ? default_backend[] :
+        backend isa KernelAbstractions.Backend ? backend :
+        _backend_from_name(string(backend))
     move = function (a)
-        like === nothing ? kernel_array(a) : to_backend(like, a)
+        KernelAbstractions.get_backend(a) == B && return a
+        dest = KernelAbstractions.zeros(B, eltype(a), size(a))
+        copyto!(dest, a)
+        return dest
     end
     # ---- near field: one CSR row per matrix row (cluster order) ----
     # Column indices are stored as *cluster positions*; the input vector is

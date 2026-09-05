@@ -4,7 +4,7 @@ CurrentModule = HMatrixGPU
 
 # HMatrixGPU
 
-Documentation for [HMatrixGPU](https://github.com/ww1g11/HMatrixGPU.jl).
+Documentation for [HMatrixGPU](https://github.com/MagneticSimulation/HMatrixGPU.jl).
 
 ```@index
 ```

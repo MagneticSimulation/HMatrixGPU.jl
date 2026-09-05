@@ -1,6 +1,7 @@
 # HMatrixGPU.jl
 
 [![Build Status](https://github.com/MagneticSimulation/HMatrixGPU.jl/workflows/CI/badge.svg)](https://github.com/MagneticSimulation/HMatrixGPU.jl/actions)
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://magneticsimulation.github.io/HMatrixGPU.jl/dev)
 [![Coverage](https://codecov.io/gh/magneticsimulation/HMatrixGPU.jl/graph/badge.svg?token=3A2M8U8TYE)](https://codecov.io/gh/magneticsimulation/HMatrixGPU.jl)
 
 HMatrixGPU.jl compresses dense matrices that arise from kernel interactions (boundary
@@ -27,8 +28,9 @@ finite-element demagnetization field in
 - **Flat, Structure-of-Arrays layout** of the 𝓗-matrix so the matvec runs as a
   handful of fused GPU kernels instead of recursive tree traversals.
 - **Multi-backend** via KernelAbstractions: CPU, CUDA, AMDGPU, oneAPI and Metal
-  (enabled by simply loading the corresponding package).
-- A pure-Julia `HMatrixCPU` reference implementation for validation.
+  (enabled by simply loading the corresponding package). There is a single
+  `HMatrix` type — the device placement follows the data (`like=` keyword or
+  the global backend), and CPU and GPU instances can coexist.
 
 ## Installation
 

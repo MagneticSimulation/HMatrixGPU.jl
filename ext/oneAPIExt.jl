@@ -13,7 +13,8 @@ end
 HMatrixGPU.to_backend(like::oneArray, a::AbstractArray) = a isa oneArray ? a : oneArray(a)
 
 function __init__()
-    return set_oneApi_backend()
+    oneAPI.functional() && set_oneApi_backend()
+    return nothing
 end
 
 end
