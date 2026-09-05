@@ -100,10 +100,13 @@ trees `X` and `Y`.
 - `index_map_using_cpu`: Keep the cluster index maps on the CPU during tree
   construction (default; almost always the right choice).
 - `svd_recompress`: Recompress the ACA factors with a truncated SVD (default).
+- `like::Union{Nothing,AbstractArray}`: when given, all factor arrays are moved
+  to the backend where `like` lives (backend follows the data) instead of the
+  global default backend.
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
                  flatten=true, index_map_using_cpu=true, svd_recompress=true,
-                 row_block_size=1, col_block_size=1)
+                 row_block_size=1, col_block_size=1, like=nothing)
     block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
     merge_dense_matrices!(block_tree.root)
 
@@ -132,7 +135,8 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
     return build_csr_hmatrix(eltype(K), size(K, 1), size(K, 2),
                              target_map, source_map,
                              dense_matrices, dense_block_indices,
-                             U_matrices, V_matrices, approx_block_indices)
+                             U_matrices, V_matrices, approx_block_indices;
+                             like=like)
 end
 
 """
@@ -149,7 +153,14 @@ function build_csr_hmatrix(::Type{T}, m::Int, n::Int,
                            dense_matrices::Vector{Matrix},
                            dense_block_indices::Vector{Tuple{Int,Int,Int,Int}},
                            U_matrices::Vector{Matrix}, V_matrices::Vector{Matrix},
-                           approx_block_indices::Vector{Tuple{Int,Int,Int,Int}}) where {T}
+                           approx_block_indices::Vector{Tuple{Int,Int,Int,Int}};
+                           like=nothing) where {T}
+    # move an assembled host array to the landing backend: the backend of
+    # `like` when given (backend follows the data), the global default_backend
+    # otherwise
+    move = function (a)
+        like === nothing ? kernel_array(a) : to_backend(like, a)
+    end
     # ---- near field: one CSR row per matrix row (cluster order) ----
     # Column indices are stored as *cluster positions*; the input vector is
     # permuted into cluster order once per product (x_buffer), which keeps all
@@ -248,14 +259,14 @@ function build_csr_hmatrix(::Type{T}, m::Int, n::Int,
     end
 
     return HMatrix(m, n,
-                   kernel_array(Int32.(target_map)), kernel_array(Int32.(source_map)),
-                   kernel_array(Int32.(near_rowptr)), kernel_array(Int32.(near_colval)),
-                   kernel_array(near_data),
-                   kernel_array(Int32.(v_rowptr)), kernel_array(Int32.(v_colval)),
-                   kernel_array(v_data),
-                   kernel_array(Int32.(u_rowptr)), kernel_array(Int32.(u_colval)),
-                   kernel_array(u_data),
-                   kernel_array(zeros(T, L)), kernel_array(zeros(T, n)),
+                   move(Int32.(target_map)), move(Int32.(source_map)),
+                   move(Int32.(near_rowptr)), move(Int32.(near_colval)),
+                   move(near_data),
+                   move(Int32.(v_rowptr)), move(Int32.(v_colval)),
+                   move(v_data),
+                   move(Int32.(u_rowptr)), move(Int32.(u_colval)),
+                   move(u_data),
+                   move(zeros(T, L)), move(zeros(T, n)),
                    ranks, ndense, napprox)
 end
 
@@ -283,6 +294,7 @@ function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
                         source_index_map::AbstractArray{Int}, dense_blocks::Vector,
                         approx_blocks::Vector; eps=1e-5, svd_recompress=true,
                         row_block=1, col_block=1)
+    T = eltype(K)               # factors are stored in the kernel's precision
     dense_matrices = Matrix[]  # Dense blocks
     U_matrices = Matrix[]  # Low-rank U matrices
     V_matrices = Matrix[]  # Low-rank V matrices
@@ -307,14 +319,18 @@ function build_matrices(K::AbstractMatrix, target_index_map::AbstractArray{Int},
         # the ACA runs one order tighter than the SVD recompression; with the
         # relative stopping criteria this keeps the accumulated matvec error at
         # the level of the user-facing tolerance eps
+        # the ACA and SVD always compute in Float64 (the queries are
+        # converted); factors are stored in the kernel's precision afterwards
         Uc, Vc, converged = ACA_plus(length(target_ids), length(source_ids),
-                                     I -> K[target_ids_cpu[I], source_ids],
-                                     J -> K[target_ids, source_ids_cpu[J]],
+                                     I -> Float64.(K[target_ids_cpu[I], source_ids]),
+                                     J -> Float64.(K[target_ids, source_ids_cpu[J]]),
                                      eps / 10.0; row_block=row_block,
                                      col_block=col_block)
         if converged && isa(Uc, Matrix) && isa(Vc, Matrix) && svd_recompress
             Uc, Vc = SVD_recompress(Uc, Vc, eps / 10.0)
         end
+        Uc = convert(Matrix{T}, Uc)
+        Vc = convert(Matrix{T}, Vc)
 
         # Check if approximation is beneficial and the ACA converged, otherwise
         # store as dense block
@@ -363,7 +379,7 @@ function sparsify_hmatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta
     # Initialize row indices, column indices, and non-zero values for the sparse matrix
     I = Int[]  # Row indices
     J = Int[]  # Column indices
-    V = Float64[]  # Non-zero values
+    V = eltype(K)[]  # Non-zero values
 
     # Iterate over dense blocks and directly populate the sparse matrix
     for (a, b) in dense_blocks

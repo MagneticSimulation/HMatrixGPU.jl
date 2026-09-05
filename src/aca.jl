@@ -145,15 +145,17 @@ function ACA_plus(n_rows, n_cols, calc_rows, calc_cols, eps; max_iter=n_rows,
     dead_cols = falses(ng)
 
     # residual helpers (subtract the accumulated rank-block terms)
+    # the cross approximation always *computes* in Float64, regardless of the
+    # precision of the queries; factors are converted by the caller afterwards
     calc_residual_rows = function (g)     # dr x n_cols for row group g
-        res = calc_rows(dr*(g - 1) + 1 : dr*g)
+        res = convert(Matrix{Float64}, calc_rows(dr*(g - 1) + 1 : dr*g))
         for t in eachindex(U_blocks)
             res .-= U_blocks[t][dr*(g - 1) + 1 : dr*g, :] * V_blocks[t]
         end
         return res
     end
     calc_residual_cols = function (g)     # n_rows x dc for column group g
-        res = calc_cols(dc*(g - 1) + 1 : dc*g)
+        res = convert(Matrix{Float64}, calc_cols(dc*(g - 1) + 1 : dc*g))
         for t in eachindex(V_blocks)
             res .-= U_blocks[t] * V_blocks[t][:, dc*(g - 1) + 1 : dc*g]
         end

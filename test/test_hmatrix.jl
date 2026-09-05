@@ -106,6 +106,23 @@ S_ref = HMatrixGPU.sparsify_hmatrix(K, cluster, cluster; eta=1.5)
 @test isapprox(near_matrix_from_csr(h_flatten), S_ref; atol=1e-12)
 
 # ---------------------------------------------------------------------------
+# Float32 end-to-end (the ACA computes in Float64, factors store as Float32)
+# ---------------------------------------------------------------------------
+@testset "Float32 end-to-end" begin
+    K32 = Float32.(K)
+    x32 = rand(Float32, N)
+    y_ref = K32 * x32
+    h32 = HMatrix(K32, cluster, cluster; eta=1.5, eps=1e-6, flatten=false)
+    y32 = h32 * x32
+    @test eltype(y32) == Float32
+    @test norm(Float64.(y32 .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
+    h32f = HMatrix(K32, cluster, cluster; eta=1.5, eps=1e-6, flatten=true)
+    @test eltype(h32f.near_data) == Float32
+    y32f = h32f * x32
+    @test norm(Float64.(y32f .- y_ref)) / norm(Float64.(y_ref)) < 1e-3
+end
+
+# ---------------------------------------------------------------------------
 # CUDA
 # ---------------------------------------------------------------------------
 @using_gpu()
@@ -119,4 +136,14 @@ if CUDA.functional()
     y_gpu2 = CUDA.zeros(Float64, N)
     mul!(y_gpu2, h_gpu, x_gpu)
     @test norm(K * x - Array(y_gpu2)) / norm(K * x) < 1e-4
+
+    # backend follows the data: build with the global backend on CPU but
+    # `like` on the GPU — the factor arrays must land next to `like`
+    set_backend("cpu")
+    h_like = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, flatten=true,
+                     like=CUDA.zeros(Float32, 0))
+    @test h_like.near_data isa CuArray
+    @test h_like.source_index_map isa CuArray
+    y_like = h_like * CuArray(x)
+    @test isapprox(hmatrix * x, Array(y_like); rtol=1e-4)
 end

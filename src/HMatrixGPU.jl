@@ -108,6 +108,17 @@ macro using_gpu()
     end
 end
 
+"""
+    to_backend(like, a)
+
+Move the host array `a` to the backend where `like` lives ("backend follows
+the data"). Base fallback: return `a` unchanged (CPU semantics); the package
+extensions override this for their device array types
+(`to_backend(like::CuArray, a) = CuArray(a)` for CUDA, and likewise for
+AMDGPU/oneAPI/Metal).
+"""
+to_backend(like::AbstractArray, a::AbstractArray) = a
+
 function kernel_array(a::Array)
     if default_backend[] == CPU()
         return a

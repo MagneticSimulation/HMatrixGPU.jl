@@ -11,6 +11,9 @@ function set_cuda_backend()
     return nothing
 end
 
+# backend follows the data: assembled host arrays follow the device arrays
+HMatrixGPU.to_backend(like::CuArray, a::AbstractArray) = a isa CuArray ? a : CuArray(a)
+
 function __init__()
     return set_cuda_backend()
 end

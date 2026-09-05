@@ -9,6 +9,9 @@ function set_oneApi_backend()
     return nothing
 end
 
+# backend follows the data: assembled host arrays follow the device arrays
+HMatrixGPU.to_backend(like::oneArray, a::AbstractArray) = a isa oneArray ? a : oneArray(a)
+
 function __init__()
     return set_oneApi_backend()
 end
