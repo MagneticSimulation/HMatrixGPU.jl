@@ -22,6 +22,10 @@ finite-element demagnetization field in
   admissibility condition `dist > η·(r_X + r_Y)`.
 - **Adaptive Cross Approximation (ACA+)** with partial pivoting and optional
   **SVD recompression** of the low-rank blocks.
+- **High-level API**: build straight from a kernel *function* and point sets —
+  `HMatrix(pts) do x, y ... end` — the library derives the lazy `KernelMatrix`,
+  the cluster trees and all bookkeeping; a vector kernel (a `d×d`-valued `g`)
+  needs a single `dims=d`.
 - **Matrix-free assembly**: the matrix never needs to exist as a dense array —
   only block-wise `getindex` queries are required, so `K` can be any
   `AbstractMatrix` (including a lazy kernel evaluation on the GPU).
@@ -51,46 +55,48 @@ with `using`.
 
 ## Quick start (CPU)
 
+Write the physics as a kernel function — the library does the bookkeeping:
+
 ```julia
 using HMatrixGPU, LinearAlgebra
 
-# 2000 points on a ring
 N = 2000
-pts = reduce(hcat, [[sin(2π*i/N), cos(2π*i/N), 0.0] for i in 1:N])
-
-# Matrix-free kernel: 2D Laplace single-layer potential (log kernel)
-struct Laplace2D <: AbstractMatrix{Float64}
-    X::Matrix{Float64}
-    Y::Matrix{Float64}
+pts = [(sin(2π*i/N), cos(2π*i/N), 0.0) for i in 1:N]  # one point per element
+                                                      # (a d×N matrix works too)
+# 2D Laplace single-layer potential (log kernel); the same code runs on CPU and GPU
+H = HMatrix(pts; eta = 1.5, eps = 1e-6, max_points_per_leaf = 64) do x, y
+    d = norm(x - y)
+    d < 1e-12 ? 0.0 : -log(d)/(2π)          # the self-term guard is the kernel's job
 end
-Base.size(K::Laplace2D) = size(K.X, 2), size(K.Y, 2)
-Base.getindex(K::Laplace2D, i::Int, j::Int) =
-    let d = norm(K.X[:, i] .- K.Y[:, j]); d < 1e-12 ? 0.0 : -0.5/π*log(d) end
-
-K = Laplace2D(pts, pts)
-X = ClusterTree(pts; max_points_per_leaf = 64)
-Y = ClusterTree(pts; max_points_per_leaf = 64)
-
-# Build the compressed matrix (the same structure runs on CPU and GPU)
-H = HMatrix(K, X, Y; eta = 1.5, eps = 1e-6)
 
 info(H)                     # compression statistics
 y = H * rand(N)             # compressed matrix-vector product
 ```
 
-On the example above the compression ratio is ≈ 8.7× (268 leaves, ranks 4–5) and
-the relative error of the matvec with respect to the exact kernel is ≈ 3.1e-8.
+A vector-valued kernel — `g` returning a `d×d` matrix, e.g. the demagnetization
+tensor — needs one extra keyword, `dims = d`; the cluster trees, the DOF
+flattening (`K[d(p-1)+c, d(q-1)+e] = g(x_p, y_q)[c, e]`) and grouped ACA
+pivoting all follow from it, and the matvec keeps flat `dN`-vectors in/out.
+
+On the example above the compression ratio is ≈ 8.6× (276 leaves, ranks 4–5) and
+the relative error of the matvec with respect to the exact kernel is ≈ 2.1e-8.
 `eps` is a *relative* per-block tolerance (the ACA stopping criterion and the
 SVD recompression truncate at fractions of each block's norm), so the achieved
-accuracy is independent of the scale of the kernel.
+accuracy is independent of the scale of the kernel. Need index-level control,
+custom storage or device-side block evaluation? The explicit low-level mode —
+a hand-written lazy `AbstractMatrix` plus `HMatrix(K, X, Y; ...)` — covers these cases (see [`examples/scalar_laplace3d.jl`](examples/scalar_laplace3d.jl)
+and [`examples/hmatrix_vector.jl`](examples/hmatrix_vector.jl)).
 
 ## GPU usage
 
 ```julia
 using HMatrixGPU, CUDA   # the vendor package is loaded explicitly by the user
 
-H = HMatrix(K, X, Y; eta = 1.0, eps = 1e-6, backend = "cuda")
-y = H * x            # x must already live on the GPU (e.g. CuArray)
+H = HMatrix(pts; eta = 1.5, eps = 1e-6, backend = "cuda") do x, y
+    d = norm(x - y)
+    d < 1e-12 ? 0.0 : -log(d)/(2π)
+end
+y = H * CuArray(x)   # x must already live on the GPU (e.g. CuArray)
 ```
 
 `backend="cuda"` resolves the loaded CUDA package at construction time — there
@@ -101,11 +107,13 @@ matrices above are independent instances and can be used interleaved.
 The `HMatrix` stores all blocks in flat device arrays so that the matvec runs
 as three kernels (a permutation, `V*x`, and a fused near-field/`U` kernel).
 
-For large matrices you typically do not want to materialize `K` at all: define a
-batched `getindex(K, I::Vector{Int}, J::Vector{Int})` that evaluates your kernel
-with a KernelAbstractions kernel and only the required blocks are ever computed.
-A complete, runnable example (the dipolar demag tensor on a GPU) is provided in
-[`examples/hmatrix_vector.jl`](examples/hmatrix_vector.jl).
+With the high-level API the matrix never materializes at all: the assembly
+queries only the blocks it needs through the kernel function, and the factors
+land on the chosen backend. For large-scale problems where even the host-side
+block evaluation is the bottleneck, the explicit low-level mode lets you
+evaluate the queried blocks with a KernelAbstractions kernel directly on the
+device. A complete, runnable example (the dipolar demag tensor on a GPU) is
+provided in [`examples/hmatrix_vector.jl`](examples/hmatrix_vector.jl).
 
 > [!NOTE]
 > The compressed matrix is stored as three CSR operators (near field, far-field

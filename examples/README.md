@@ -7,9 +7,18 @@ point) demagnetization tensor of micromagnetics.
 
 Every script follows the same contract:
 
-- the kernel `K` is a **lazy, matrix-free** `AbstractMatrix` — the dense
-  matrix never exists, only the blocks the H-matrix assembly queries are
-  ever evaluated;
+- the physics is written as a **kernel function** `g(x, y)` that receives the
+  *coordinates* of a target/source point pair (a scalar for the 1-DOF
+  kernels, a `3×3` matrix for the demag tensor). In the **high-level mode**
+  the library derives the lazy `KernelMatrix`, the cluster trees and the
+  compressed `HMatrix` from `g` and the point set — `HMatrix(pts) do x, y
+  ... end` — and the user writes no bookkeeping at all; in the **explicit
+  low-level mode** the user hand-writes a lazy `AbstractMatrix` (struct +
+  size + batched `getindex`) and builds `HMatrix(K, X, Y; ...)`, keeping full
+  control over storage and block evaluation. Both modes use the same
+  assembly and the same compressed representation;
+- the kernel is matrix-free in both modes — the dense matrix never exists,
+  only the blocks the H-matrix assembly queries are ever evaluated;
 - the compressed matvec is validated against the exact kernel with a hard
   assertion (`relerr < 1e-5`; the script exits non-zero on failure, so any
   script doubles as a smoke test);
@@ -19,13 +28,13 @@ Every script follows the same contract:
 
 ## The examples
 
-| Script | Scenario | Kernel | Key parameters | Default N (matrix) |
-| :-- | :-- | :-- | :-- | :-- |
-| [`scalar_laplace2d.jl`](scalar_laplace2d.jl) | 2D Laplace single-layer BEM on a ring | `-log(r)/(2π)` | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
-| [`scalar_laplace3d.jl`](scalar_laplace3d.jl) | 3D Laplace single-layer BEM on a Fibonacci sphere | `1/(4πr)` | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
-| [`covariance_gaussian.jl`](covariance_gaussian.jl) | Gaussian covariance, GP/kriging in the unit cube | `σ²·exp(-r²/(2ℓ²))`, σ=1, ℓ=0.1 | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
-| [`vector_demag.jl`](vector_demag.jl) | dipolar demag tensor, thin-film slab, host-loop kernel | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.5, eps=1e-4, dims=3` (block sizes default to the trees' dims: 3×3) | 2000 (6000×6000) |
-| [`hmatrix_vector.jl`](hmatrix_vector.jl) | same tensor, **device-side kernel evaluation** (advanced) | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.0, eps=1e-6, dims=3` (block sizes default to the trees' dims: 3×3) | 2000 (6000×6000) |
+| Script | Mode | Scenario | Kernel | Key parameters | Default N (matrix) |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| [`scalar_laplace2d.jl`](scalar_laplace2d.jl) | high-level (do-block) | 2D Laplace single-layer BEM on a ring | `-log(r)/(2π)` | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
+| [`scalar_laplace3d.jl`](scalar_laplace3d.jl) | explicit low-level | 3D Laplace single-layer BEM on a Fibonacci sphere | `1/(4πr)` | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
+| [`covariance_gaussian.jl`](covariance_gaussian.jl) | high-level (do-block) | Gaussian covariance, GP/kriging in the unit cube | `σ²·exp(-r²/(2ℓ²))`, σ=1, ℓ=0.1 | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
+| [`vector_demag.jl`](vector_demag.jl) | high-level (do-block, `dims=3`) | dipolar demag tensor, thin-film slab, host-loop kernel | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.5, eps=1e-4, dims=3` (ACA block sizes follow the `dims`: 3×3) | 2000 (6000×6000) |
+| [`hmatrix_vector.jl`](hmatrix_vector.jl) | explicit low-level, **device-side kernel evaluation** (advanced) | same tensor, block queries run on the device | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.0, eps=1e-6, dims=3` (block sizes follow the `dims`: 3×3) | 2000 (6000×6000) |
 
 ## Measured numbers
 
@@ -40,16 +49,17 @@ the GPU-device path.
 
 | Script | assembly | compression | rank | matvec | relerr | assembly (CUDA) | matvec (CUDA) | relerr (CUDA) |
 | :-- | --: | --: | :-- | --: | --: | --: | --: | --: |
-| `scalar_laplace2d.jl` | 5.9 s | 15.8× | 4–5 | 1.24 ms | 2.8e-08 | 3.4 s | 0.06 ms | 2.8e-08 |
-| `scalar_laplace3d.jl` | 7.5 s | 2.4× | 9–14 | 11.02 ms | 2.5e-09 | 4.8 s | 0.12 ms | 2.5e-09 |
-| `covariance_gaussian.jl` | 13.5 s | 1.3× | 10–34 | 22.00 ms | 5.5e-12 | 8.7 s | 0.17 ms | 5.5e-12 |
-| `vector_demag.jl` | 9.8 s | 2.7× | 17–27 | 22.61 ms | 1.7e-10 | 5.9 s | 0.16 ms | 1.7e-10 |
+| `scalar_laplace2d.jl` | 8.1 s | 15.8× | 4–5 | 1.28 ms | 2.8e-08 | 7.1 s | 0.06 ms | 2.8e-08 |
+| `scalar_laplace3d.jl` | 7.5 s | 2.4× | 9–14 | 10.82 ms | 2.5e-09 | 6.1 s | 0.12 ms | 2.5e-09 |
+| `covariance_gaussian.jl` | 15.7 s | 1.3× | 10–34 | 21.57 ms | 5.5e-12 | 12.3 s | 0.17 ms | 5.5e-12 |
+| `vector_demag.jl` | 12.6 s | 2.7× | 17–27 | 22.10 ms | 1.7e-10 | 10.8 s | 0.16 ms | 1.7e-10 |
 | `hmatrix_vector.jl` (CPU path) | 18.2 s | 1.4× | 46–100 | 58.4 ms | 1.6e-10 | — | — | — |
-| `hmatrix_vector.jl` (CUDA) | — | — | — | — | — | 18.8 s | 0.26 ms | 1.6e-10 |
+| `hmatrix_vector.jl` (CUDA) | — | — | — | — | — | 20.5 s | 0.28 ms | 1.6e-10 |
 
-Lazy kernels assemble through the CPU ACA in all examples (the queried
-blocks are evaluated by the kernel, then the factors are placed on the
-requested backend); only the matvec is device-side — except in
+The three high-level scripts and the explicit `scalar_laplace3d.jl` share the
+same computation path: the kernel is evaluated by the assembly through CPU ACA
+per block (the queried blocks call `g`, then the factors are placed on the
+requested backend) and only the matvec is device-side — except in
 `hmatrix_vector.jl`, where the block evaluation itself already runs on the
 device. Notes: the 2D log kernel on a ring is the smoothest case (rank 4–5,
 15.8× compression); the covariance example at these parameters is dominated
@@ -85,18 +95,18 @@ example; `Array(y)` is the only synchronization.
 ## Which example should I start from?
 
 - **Scalar problem, one DOF per point** (BEM potentials, covariances): start
-  with `scalar_laplace2d.jl`, then `scalar_laplace3d.jl` for a 3D geometry.
-  No `dims`/block-size settings are needed — the defaults handle it.
+  with `scalar_laplace2d.jl` — the whole workflow is the do-block, no
+  `dims`/block-size settings are needed (the defaults handle it). Then
+  `scalar_laplace3d.jl` shows the same workflow in the explicit low-level
+  mode for a 3D geometry.
 - **Vector problem, d DOF per point** (magnetization, elasticity): use
-  `vector_demag.jl`. Build the cluster trees with `dims=3` (tree nodes then
-  cover whole cells) — the ACA block sizes default to the trees' `dims`, so
-  the ACA pivots one cell at a time, which scalar per-column pivoting
-  (starving the weak components of anisotropic kernels) would not; explicit
-  `row_block_size`/`col_block_size` override the default.
-- **Matrix-free vs. dense kernels:** all examples here are matrix-free (lazy
-  `K`), which is the fully supported assembly path today — CPU ACA per block,
-  factors on any backend. A dense `K::Matrix` with a CUDA backend has a
-  batched GPU assembly fast path; that path is still being stabilized, so the
-  examples intentionally stick to the matrix-free route. For large-scale
-  matrix-free kernels, `hmatrix_vector.jl` shows how to evaluate the queried
-  blocks with a KernelAbstractions kernel directly on the active backend.
+  `vector_demag.jl`. `dims=3` is the single knob — the trees are built per
+  cell, the DOFs are flattened automatically, and the ACA block sizes default
+  to the cell (3×3): the ACA pivots one cell at a time, which scalar
+  per-column pivoting (starving the weak components of anisotropic kernels)
+  would not. Explicit `row_block_size`/`col_block_size` still override the
+  default.
+- **Scaling the block evaluation up:** all examples here evaluate the queried
+  blocks on the host through the kernel function. When even that is the
+  bottleneck, `hmatrix_vector.jl` shows the explicit low-level mode where the
+  block queries run as a KernelAbstractions kernel directly on the device.

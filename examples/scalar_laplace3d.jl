@@ -12,6 +12,9 @@
 # never materializes K and only queries the blocks it needs through getindex.
 # The same HMatrixGPU code runs unchanged on CPU and GPU — the closing section
 # rebuilds the matrix on a CUDA device when one is available.
+#
+# explicit/low-level mode: full control over storage and batched evaluation;
+# see scalar_laplace2d.jl for the high-level form of the same workflow.
 # =============================================================================
 
 using HMatrixGPU
