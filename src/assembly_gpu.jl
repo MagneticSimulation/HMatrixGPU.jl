@@ -1,50 +1,73 @@
-module CUDAExt
+# ---------------------------------------------------------------------------
+# Batched GPU assembly for dense kernels, generic over KernelAbstractions
+# backends (moved out of the CUDA extension). Which backends can run it is
+# decided at runtime by the device_svd_available probe — no vendor types are
+# referenced here. The CUDA extension still provides a CUDA-specialized method
+# of build_matrices_gpu_dense until the extensions are removed.
+# ---------------------------------------------------------------------------
 
-using HMatrixGPU
-using CUDA
-using KernelAbstractions
-using LinearAlgebra
-using Random
+# capability cache: does a device-side svd work for this backend type?
+const svd_capable_backends = Dict{Type,Bool}()
 
-CUDA.allowscalar(false)
-
-function set_cuda_backend()
-    HMatrixGPU.all_backends[1] = CUDA.CUDABackend()
-    HMatrixGPU.set_backend("cuda")
-    return nothing
+function device_svd_available(B)::Bool
+    B isa KernelAbstractions.CPU && return false
+    return get!(svd_capable_backends, typeof(B)) do
+        try
+            A = KernelAbstractions.zeros(B, Float64, 2, 2)
+            copyto!(A, [1.0 2.0; 3.0 4.0])
+            svd(A)
+            KernelAbstractions.synchronize(B)
+            true
+        catch
+            false
+        end
+    end
 end
 
-# backend follows the data: assembled host arrays follow the device arrays
-HMatrixGPU.to_backend(like::CuArray, a::AbstractArray) = a isa CuArray ? a : CuArray(a)
-
-function __init__()
-    # importing a GPU package must not switch the backend on machines
-    # without a working GPU (e.g. CPU-only CI runners)
-    CUDA.functional() && set_cuda_backend()
-    return nothing
+# upload `a` to the backend `B` unless it is already there
+# (temporary location — moves to src/HMatrixGPU.jl with the stateless flip)
+function move_to_backend(B::KernelAbstractions.Backend, a::AbstractArray)
+    KernelAbstractions.get_backend(a) == B && return a
+    d = KernelAbstractions.zeros(B, eltype(a), size(a))
+    copyto!(d, a)
+    return d
 end
 
-# ---------------- batched GPU assembly (dense kernels) ----------------
-
-HMatrixGPU.gpu_dense_assembly_available(::CUDA.CUDABackend) = CUDA.functional()
+# block gather: out[ii, jj] = Kmat[tmap[rs + ii - 1], smap[cs + jj - 1]] for the
+# cluster ranges (rs:re, cs:ce). Plain index arithmetic instead of device-side
+# fancy indexing, whose semantics are not guaranteed across vendors; host
+# scalars carry the ranges so nothing but the index maps and the matrix live on
+# the device.
+@kernel function gather_block!(out, @Const(Kmat), @Const(tmap), @Const(smap),
+                               @Const(rs), @Const(re), @Const(cs), @Const(ce))
+    ii, jj = @index(Global, NTuple)
+    @inbounds if ii <= re - rs + 1 && jj <= ce - cs + 1
+        out[ii, jj] = Kmat[tmap[rs + ii - 1], smap[cs + jj - 1]]
+    end
+end
 
 """
-    HMatrixGPU.build_matrices_gpu_dense(K_cpu, backend, target_index_map,
-        source_index_map, dense_blocks, approx_blocks; eps=1e-5)
+    build_matrices_gpu_dense(K_cpu, backend, target_index_map, source_index_map,
+                             dense_blocks, approx_blocks; eps=1e-5)
 
 Batched GPU assembly of the far field for a *dense* kernel `K_cpu`: the whole
-matrix is uploaded to the device once, every far block is evaluated by a
-device gather and factorized with a single-sided randomized SVD (Halko et al.;
-the "randomized range approximation" of Dölz et al.) — one device SVD per
-block; the range basis comes from the small Gram matrix of the test
-projection, orthogonalized twice (CholeskyQR2-style), with the range cutoff
-tied to `eps` so tight tolerances keep resolving below the truncation
-threshold. The test matrix `Ω` is
-seeded per block, so repeated assemblies of the same matrix are bitwise
-identical. Blocks whose ε-rank exceeds the storage crossover `m*n/(m+n)` are
-reported as dense (they stay in the near field); numerically zero blocks are
-dropped (their rows stay covered by the near/U partition). All heavy
-operations are device-side GEMMs and cuSOLVER calls.
+matrix is uploaded to the device once, every far block is gathered by a kernel
+and factorized with a single-sided randomized SVD (Halko et al.; the
+"randomized range approximation" of Dölz et al.) — one device SVD per block;
+the range basis comes from the small Gram matrix of the test projection,
+orthogonalized twice (CholeskyQR2-style), with the range cutoff tied to `eps`
+so tight tolerances keep resolving below the truncation threshold. The test
+matrix `Ω` is seeded per block, so repeated assemblies of the same matrix are
+bitwise identical. Blocks whose ε-rank exceeds the storage crossover `m*n/(m+n)`
+are reported as dense (they stay in the near field); numerically zero blocks
+are dropped (their rows stay covered by the near/U partition). All heavy
+operations are device-side GEMMs plus the per-block device `svd`.
+
+Generic over KernelAbstractions backends: any backend passing the
+`device_svd_available` probe works. Device-side slicing and fancy indexing are
+deliberately not relied upon (the block gather is a plain kernel); the
+device-array slicing/view support used by the factorization itself is exactly
+what the probe tests.
 
 The randomized SVD needs no grouped pivoting and is immune to component
 anisotropy, so `row_block_size`/`col_block_size` are not used on this path.
@@ -58,21 +81,20 @@ anisotropy, so `row_block_size`/`col_block_size` are not used on this path.
 - `ranks`: the truncated rank of each low-rank block.
 - `approx_block_indices`: cluster ranges of the low-rank blocks.
 """
-# CUDA-specialized method: takes dispatch precedence over the generic
-# implementation in src/assembly_gpu.jl (removed together with the extensions)
-function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
-                                             backend::CUDA.CUDABackend,
-                                             target_index_map::Vector{Int},
-                                             source_index_map::Vector{Int},
-                                             dense_blocks::Vector,
-                                             approx_blocks::Vector;
-                                             eps::Float64=1e-5)
+function build_matrices_gpu_dense(K_cpu::Matrix,
+                                  backend::KernelAbstractions.Backend,
+                                  target_index_map::Vector{Int},
+                                  source_index_map::Vector{Int},
+                                  dense_blocks::Vector,
+                                  approx_blocks::Vector;
+                                  eps::Float64=1e-5)
     # the assembly always computes in Float64 (the randomized SVD and the
     # gathers are ill-conditioned in Float32); the caller stores in eltype(K)
     K64 = eltype(K_cpu) === Float64 ? K_cpu : Float64.(K_cpu)
-    K_gpu = CuArray(K64)                        # uploaded once
-    tmap_d = CuArray(target_index_map)          # uploaded once, sliced per block
-    smap_d = CuArray(source_index_map)
+    K_gpu = move_to_backend(backend, K64)                   # uploaded once
+    tmap_d = move_to_backend(backend, target_index_map)     # uploaded once, gathered per block
+    smap_d = move_to_backend(backend, source_index_map)
+    gather! = gather_block!(backend, groupsize[])
 
     # per-block device factors: U (m x r) materialized, V kept as an n x r
     # view of the SVD result (column j = rank row j — the far-CSR row order,
@@ -92,10 +114,11 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
     λ_cut = max((eps / 50)^2, 1e-16)
 
     for (bi, (a, b)) in enumerate(approx_blocks)
-        rows = tmap_d[a.start_idx:(a.end_idx - 1)]   # device-side range copy
-        cols = smap_d[b.start_idx:(b.end_idx - 1)]
-        m, n = length(rows), length(cols)
-        Bi = K_gpu[rows, cols]                       # device gather (m x n)
+        rs, re = a.start_idx, a.end_idx - 1
+        cs, ce = b.start_idx, b.end_idx - 1
+        m, n = re - rs + 1, ce - cs + 1
+        Bi = KernelAbstractions.zeros(backend, Float64, m, n)   # device gather (m x n)
+        gather!(Bi, K_gpu, tmap_d, smap_d, rs, re, cs, ce; ndrange=(m, n))
 
         # storage crossover in columns; range-finder size with oversampling
         crossover = floor(Int, m * n / (m + n))
@@ -107,7 +130,7 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
         # per-block seeding keeps repeated assemblies of the same matrix
         # bitwise identical (the same invariant as the CPU ACA path); the
         # n x l draw is tiny, so the async host-to-device upload is free
-        Ω = CuArray(randn(MersenneTwister(bi), n, l))  # n x l test matrix
+        Ω = move_to_backend(backend, randn(MersenneTwister(bi), n, l))  # n x l test matrix
         Y = Bi * Ω                                  # m x l random range
         G = Symmetric(Array(Y' * Y))                # l x l Gram (host)
         E = eigen(G)
@@ -118,7 +141,7 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
         # covered by the near/U row-set partition, so `near_u_mul_vec_warp!`
         # writes each of them exactly once (as zero)
         l1 == 0 && continue
-        Q = Y * CuArray(E.vectors[:, keep] .* (1 ./ sqrt.(λ[keep]))')  # m x l1 orthonormal
+        Q = Y * move_to_backend(backend, E.vectors[:, keep] .* (1 ./ sqrt.(λ[keep]))')  # m x l1 orthonormal
 
         # second Gram pass (CholeskyQR2-style): the first pass loses up to
         # O(eps * lambda_max/lambda_min) orthogonality on fast-decaying spectra
@@ -128,7 +151,7 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
         keep2 = λ2 .> maximum(λ2) * 1e-12
         l1 = count(keep2)
         l1 == 0 && continue                        # safety valve (λ2 ≈ 1 in theory)
-        Q = Q * CuArray(E2.vectors[:, keep2] .* (1 ./ sqrt.(λ2[keep2]))')
+        Q = Q * move_to_backend(backend, E2.vectors[:, keep2] .* (1 ./ sqrt.(λ2[keep2]))')
 
         Bt = Q' * Bi                               # l1 x n projected block
         U2, S2, V2 = svd(Bt)                       # the single device SVD
@@ -168,6 +191,4 @@ function HMatrixGPU.build_matrices_gpu_dense(K_cpu::Matrix,
                   for (a, b) in dense_blocks]
     dense_all = vcat(dense_near, dense_far)
     return K_gpu, dense_all, U_factors, V_factors, ranks, approx_block_indices
-end
-
 end

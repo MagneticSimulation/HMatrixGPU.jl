@@ -55,11 +55,11 @@ end
 
 Base.size(h::HMatrix) = (h.m, h.n)
 
-# GPU batched dense-K assembly: implemented by package extensions (CUDAExt).
-# When unavailable (or for matrix-free kernels) the CPU ACA path is used.
-function build_matrices_gpu_dense end
-# per-backend capability: implemented by the package extensions (CUDAExt)
-gpu_dense_assembly_available(::KernelAbstractions.Backend) = false
+# GPU batched dense-K assembly: generic over KernelAbstractions backends with a
+# working device svd (src/assembly_gpu.jl); the CUDA extension keeps a
+# CUDA-specialized method that takes precedence. When the probe fails (or for
+# matrix-free kernels) the CPU ACA path is used.
+gpu_dense_assembly_available(B::KernelAbstractions.Backend) = device_svd_available(B)
 
 """
     HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
@@ -123,10 +123,10 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
         backend isa KernelAbstractions.Backend ? backend :
         _backend_from_name(string(backend))
 
-    # GPU batched fast path: dense kernels on a GPU backend (implemented in
-    # CUDAExt). Matrix-free kernels and CPU backends use the CPU ACA path;
-    # row_block_size/col_block_size only apply to the CPU path (the GPU
-    # randomized SVD needs no grouped pivoting).
+    # GPU batched fast path: dense kernels on a GPU backend whose device svd
+    # probe passes (src/assembly_gpu.jl). Matrix-free kernels and CPU backends
+    # use the CPU ACA path; row_block_size/col_block_size only apply to the CPU
+    # path (the GPU randomized SVD needs no grouped pivoting).
     if !(B isa KernelAbstractions.CPU) && gpu_dense_assembly_available(B) &&
        K isa DenseMatrix
         K_gpu, dense_all, U_factors, V_factors, ranks, approx_block_indices =
