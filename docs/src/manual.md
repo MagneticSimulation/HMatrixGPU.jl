@@ -287,6 +287,27 @@ returns a `SparseMatrixCSC` containing exactly the near-field blocks of the
 block tree — everything that would be stored densely. It accepts any
 `AbstractMatrix` kernel, so it composes naturally with `KernelMatrix`.
 
+### Block structure and plotting
+
+`hmatrix_blocks(H)` reconstructs the leaf blocks of the assembled
+[`HMatrix`](@ref) from its CSR index arrays — a vector of `(rows, cols)` for
+the dense blocks and `(rows, cols, rank)` for the low-rank ones. It works
+for GPU-resident matrices too: only the index arrays are downloaded. The
+optional plotting extension renders this structure as a heatmap once
+[Plots.jl](https://github.com/JuliaPlots/Plots.jl) is loaded in the session:
+
+```julia
+using Plots              # loading Plots activates HMatrixGPUPlotsExt
+
+p = plot_hmatrix(H; size = (700, 700))   # teal = dense, amber = low-rank,
+                                         # origin (0, 0) at the bottom left
+savefig(p, "hmatrix_pattern.png")
+```
+
+`plot_hmatrix` is deliberately bare — no title, no axis labels — so the
+figure can be captioned externally; `nx`/`ny` set the raster resolution and
+extra `kwargs...` are forwarded to `Plots.heatmap`.
+
 ## Performance tuning
 
 | Knob | Effect |

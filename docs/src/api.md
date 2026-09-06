@@ -62,6 +62,24 @@ info
 sparsify_hmatrix
 ```
 
+## Plotting (optional Plots.jl extension)
+
+```@docs
+hmatrix_blocks
+```
+
+`plot_hmatrix(H::HMatrix; nx = 600, ny = 600, kwargs...) -> Plots.Plot` —
+heatmap of the block distribution: teal = dense (near-field) blocks, amber =
+low-rank (far-field) blocks, origin `(0, 0)` at the bottom left (matrix
+entry `(1, 1)` sits there). No title or axis labels, so a caption can be
+provided externally; `nx`/`ny` set the raster resolution and extra
+`kwargs...` go to `Plots.heatmap`. Save the result with
+`Plots.savefig(p, "hmatrix_pattern.png")`.
+
+The method is provided by the `HMatrixGPUPlotsExt` package extension and
+becomes available once [Plots.jl](https://github.com/JuliaPlots/Plots.jl) is
+loaded in the session (`using Plots`). Both functions are exported.
+
 ## Backends and utilities
 
 ```@docs

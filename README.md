@@ -29,6 +29,9 @@ simulations.
   `AbstractMatrix` (including a lazy kernel evaluation on the GPU).
 - **Flat, Structure-of-Arrays layout** of the 𝓗-matrix so the matvec runs as a
   handful of fused GPU kernels instead of recursive tree traversals.
+- **Block-pattern plotting** via an optional Plots.jl extension:
+  `plot_hmatrix(H)` renders the block structure as a heatmap (teal = dense,
+  amber = low-rank); `hmatrix_blocks(H)` reconstructs the leaf blocks.
 - **Multi-backend** via KernelAbstractions: CPU, CUDA, AMDGPU, oneAPI and Metal.
   The package itself has zero GPU dependencies — the vendor package is the
   user's choice and is simply loaded with `using` (loading it has zero side
