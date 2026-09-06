@@ -43,9 +43,9 @@ vendors — coexist in the same process and can be multiplied in alternation.
 `HMatrixGPU.backend_from_name(name)` is the strict resolver that the `backend=`
 keyword uses internally — it errors, rather than guessing, when the vendor
 package is not loaded
-(``backend "cuda" requires CUDA.jl — run `using CUDA` first``)
+(```backend "cuda" requires CUDA.jl — run `using CUDA` first```)
 or has no functional device
-(``backend "cuda" was requested but no functional device was detected``).
+(```backend "cuda" was requested but no functional device was detected```).
 There is deliberately no `"gpu"` auto-choice and no silent fallback: a script
 that wants a soft fallback wraps the call in `try`/`catch` itself. The
 `@using_gpu()` macro is a plain convenience loader — it loads whichever vendor
