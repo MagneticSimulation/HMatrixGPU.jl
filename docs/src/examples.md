@@ -34,17 +34,20 @@ kernel; the CUDA columns come from the closing GPU section of each script.
 
 | Script | assembly | compression | rank | matvec | relerr | assembly (CUDA) | matvec (CUDA) | relerr (CUDA) |
 | :-- | --: | --: | :-- | --: | --: | --: | --: | --: |
-| `scalar_laplace2d.jl` | 5.9 s | 15.8× | 4–5 | 1.24 ms | 2.8e-08 | 3.4 s | 0.06 ms | 2.8e-08 |
-| `scalar_laplace3d.jl` | 7.5 s | 2.4× | 9–14 | 11.02 ms | 2.5e-09 | 4.8 s | 0.12 ms | 2.5e-09 |
-| `covariance_gaussian.jl` | 13.5 s | 1.3× | 10–34 | 22.00 ms | 5.5e-12 | 8.7 s | 0.17 ms | 5.5e-12 |
-| `vector_demag.jl` | 9.8 s | 2.7× | 17–27 | 22.61 ms | 1.7e-10 | 5.9 s | 0.16 ms | 1.7e-10 |
+| `scalar_laplace2d.jl` | 8.1 s | 15.8× | 4–5 | 1.28 ms | 2.8e-08 | 7.1 s | 0.06 ms | 2.8e-08 |
+| `scalar_laplace3d.jl` | 7.5 s | 2.4× | 9–14 | 10.82 ms | 2.5e-09 | 6.1 s | 0.12 ms | 2.5e-09 |
+| `covariance_gaussian.jl` | 15.7 s | 1.3× | 10–34 | 21.57 ms | 5.5e-12 | 12.3 s | 0.17 ms | 5.5e-12 |
+| `vector_demag.jl` | 12.6 s | 2.7× | 17–27 | 22.10 ms | 1.7e-10 | 10.8 s | 0.16 ms | 1.7e-10 |
 | `hmatrix_vector.jl` (CPU path) | 18.2 s | 1.4× | 46–100 | 58.4 ms | 1.6e-10 | — | — | — |
-| `hmatrix_vector.jl` (CUDA) | — | — | — | — | — | 18.8 s | 0.26 ms | 1.6e-10 |
+| `hmatrix_vector.jl` (CUDA) | — | — | — | — | — | 20.5 s | 0.28 ms | 1.6e-10 |
 
 Lazy kernels assemble through the CPU ACA in all examples (the queried blocks
 are evaluated by the kernel, then the factors are placed on the requested
 backend); only the matvec is device-side — except in `hmatrix_vector.jl`,
-where the block evaluation itself already runs on the device. Notes: the 2D
+where the block evaluation itself already runs on the device. The three
+high-level scripts pay the wrapper's ≈ 30% assembly-time overhead (see the
+[manual](manual.md)); ranks, compression and accuracy are bit-identical to the
+equivalent low-level construction. Notes: the 2D
 log kernel on a ring is the smoothest case (rank 4–5, 15.8× compression); the
 covariance example at these parameters is dominated by its near-field blocks
 in 3D, so its compression is modest — the win is the O(N log N) matvec and

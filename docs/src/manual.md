@@ -128,16 +128,20 @@ assembly.
 ## The two API tiers and when to leave the high-level one
 
 The high-level constructors do the bookkeeping: trees, the lazy kernel
-wrapper, block sizes that follow `dims`, the type probe. The low-level
-constructor
+wrapper, block sizes that follow `dims`, the type probe. The bookkeeping has a
+small price: measured on the example gallery, the thin wrapper adds ≈ 30% to
+the assembly time (every block query travels through `KernelMatrix`'s batched
+`getindex`, which calls `g` once per point pair on host views). Ranks,
+compression and products are bit-identical to the equivalent low-level
+construction — only the assembly time differs. The low-level constructor
 
 ```julia
 HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; kwargs...)
 ```
 
 takes `K` as *you* define it — any `AbstractMatrix` with any
-internal representation, storage eltype, and evaluation strategy. Stay with
-(or drop down to) the explicit mode when you need:
+internal representation, storage eltype, and evaluation strategy — and is the
+right tool when that price matters or when you need:
 
 - **index-level control** — e.g. a kernel whose entries are not a function of
   two coordinates (mesh-based integral kernels with their own DOF layout);
@@ -220,8 +224,10 @@ like=  >  backend=  >  device of the primary data  >  CPU()
   [getting started](getting-started.md)).
 - The **primary data** is `K` for the low-level constructor and the point set
   for the high-level ones — device follows data. Explicit `like=`/`backend=`
-  always win over the data. Mixing devices between target and source data is
-  an error.
+  always win over the data: with a keyword given, even mixed-device target and
+  source point sets are accepted (each device-resident set is downloaded once).
+  When the landing device is decided from the data instead, mixing devices
+  between target and source points is an error.
 - Device point sets are downloaded **once** during construction: trees and
   high-level kernels are host-side; what ends up on the device is the three
   CSR operators, the index maps and the product buffers (moved at

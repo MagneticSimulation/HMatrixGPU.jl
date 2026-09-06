@@ -74,8 +74,8 @@ y = H * rand(N)             # compressed matrix-vector product
 ```
 
 A vector-valued kernel — `g` returning a `d×d` matrix, e.g. the demagnetization
-tensor — needs one extra keyword, `dims = d`; the cluster trees, the DOF
-flattening (`K[d(p-1)+c, d(q-1)+e] = g(x_p, y_q)[c, e]`) and grouped ACA
+tensor — needs one extra keyword, `dims = d`; the cluster trees, the interleaved
+DOF layout (`K[d(p-1)+c, d(q-1)+e] = g(x_p, y_q)[c, e]`) and grouped ACA
 pivoting all follow from it, and the matvec keeps flat `dN`-vectors in/out.
 
 On the example above the compression ratio is ≈ 8.6× (276 leaves, ranks 4–5) and
@@ -124,9 +124,10 @@ provided in [`examples/hmatrix_vector.jl`](examples/hmatrix_vector.jl).
 ## Backend options
 
 The landing backend of an `HMatrix` is resolved per construction:
-`like=` > `backend=` > the device of the primary data (`K`) > `CPU()`. There is
-no global backend state and no auto-detection — the user chooses the backend,
-the package implements the functionality.
+`like=` > `backend=` > the device of the primary data (`K`, or the point set
+for the high-level constructors) > `CPU()`. There is no global backend state
+and no auto-detection — the user chooses the backend, the package implements
+the functionality.
 
 | `backend=` name     | Hardware  | KernelAbstractions backend |
 | :------------------ | :-------- | :------------------------- |
@@ -146,7 +147,8 @@ in scripts, wrap the request in `try`/`catch` — see the examples.
 
 - [Getting started](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/getting-started/)
 - [User manual](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/manual/)
-- [Micromagnetics (FEM demag)](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/micromagnetics/)
+- [Examples](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/examples/)
+- [Internals](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/internals/)
 - [API reference](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/api/)
 - [Known issues](https://magneticsimulation.github.io/HMatrixGPU.jl/dev/known-issues/)
 

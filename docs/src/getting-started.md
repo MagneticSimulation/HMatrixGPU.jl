@@ -31,8 +31,11 @@ instance*, at construction time, through (in order of priority)
    set (device point sets are downloaded once during construction);
 4. `CPU()` — when none of the above says anything.
 
-Explicit keywords always win over the data. Target and source data living on
-*different* devices is an error. A `HMatrix` stays where it was built: its
+Explicit keywords always win over the data. When the landing device is decided
+from the data instead (no explicit keyword), target and source points living on
+*different* devices are an error; with an explicit keyword, mixed-device point
+sets are accepted — each is downloaded once and the matrix lands where the
+keyword says. A `HMatrix` stays where it was built: its
 factors and the matvec are fixed to that device.
 
 | `backend=` name | Hardware | Vendor package | Backend object |
@@ -63,8 +66,7 @@ potential (a log kernel) between points on a ring, builds the compressed
 matrix from a kernel *function*, and validates the product against the exact
 kernel:
 
-<!-- PHASE2: 转 @example -->
-```julia
+```@example
 using HMatrixGPU, LinearAlgebra
 
 N = 800
@@ -79,7 +81,7 @@ end
 info(H)
 
 # validate the compressed product against the exact kernel matrix
-K = [let d = norm(pts[i] - pts[j]); d < 1e-12 ? 0.0 : -log(d)/(2π) end
+K = [let d = norm(pts[i] .- pts[j]); d < 1e-12 ? 0.0 : -log(d)/(2π) end
      for i in 1:N, j in 1:N]
 x = rand(N)
 println("relative error: ", norm(H * x - K * x) / norm(K * x))   # ≈ 1e-8
