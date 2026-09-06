@@ -12,80 +12,11 @@ include("mult.jl")
 
 export ClusterTree, BlockTree, ACA_plus, HMatrix, info
 
-const default_backend = Backend[CPU()]
-const all_backends = Backend[CPU(), CPU(), CPU(), CPU()]
-
 const groupsize = Ref(512)
 function set_groupsize(x)
     return groupsize[] = x
 end
 export set_groupsize
-
-export set_backend
-"""
-    set_backend(backend="cuda")
-
-Set the backend of HMatrixGPU. 
-
-The available options and their corresponding hardware and backends are shown below:
-
-| Option                 | Hardware            | Backend                  |
-| :--------------------- | :------------------ | :------------------------ |
-| "cpu"                  | CPU                 | `KernelAbstractions.CPU()` |
-| "cuda" or "nvidia"     | NVIDIA GPU          | `CUDA.CUDABackend()`     |
-| "amd" or "roc"         | AMD GPU             | `AMDGPU.ROCBackend()`    |
-| "oneAPI" or "intel"    | Intel GPU           | `oneAPI.oneAPIBackend()` |
-| "metal" or "apple"     | Apple GPU           | `Metal.MetalBackend()`   |
-
-# Examples
-
-To set the backend to use CUDA (NVIDIA GPU):
-
-```julia
-using HMatrixGPU
-using CUDA
-```
-
-To set the backend to use the CPU/CUDA:
-```
-set_backend("cpu")
-set_backend("cuda")
-```
-
-"""
-function set_backend(backend="cuda")
-    backend_names = ["CUDA", "AMDGPU", "oneAPI", "Metal"]
-    card_id = 0
-    x = lowercase(backend)
-    if x == "cuda" || x == "nvidia"
-        card_id = 1
-    elseif x == "amd" || x == "roc" || x == "amdgpu"
-        card_id = 2
-    elseif x == "oneapi" || x == "intel"
-        card_id = 3
-    elseif x == "metal" || x == "apple"
-        card_id = 4
-    end
-
-    if card_id > 0
-        default_backend[] = all_backends[card_id]
-        backend_name = backend_names[card_id]
-        if Base.find_package(backend_name) === nothing
-            @info(@sprintf("Please install %s.jl!", backend_name))
-            return false
-        end
-
-        if default_backend[] == CPU()
-            @info(@sprintf("Please import %s!", backend_name))
-            return false
-        end
-    else
-        default_backend[] = CPU()
-    end
-
-    @info(@sprintf("Switch the backend of HMatrixGPU to %s", default_backend[]))
-    return true
-end
 
 export @using_gpu
 macro using_gpu()
@@ -109,52 +40,85 @@ macro using_gpu()
     end
 end
 
+# find an already-loaded vendor module by package name without depending
+# on it: Base.loaded_modules is a Vector{PkgId} on Julia <= 1.11 and a
+# Dict{PkgId,Module} on >= 1.12
+function _loaded_vendor_module(pkg::String)
+    for entry in Base.loaded_modules
+        pid = entry isa Pair ? entry.first : entry
+        pid.name == pkg || continue
+        mod = entry isa Pair ? entry.second : Base.root_module(pid)
+        mod === nothing && continue
+        return mod
+    end
+    return nothing
+end
+
+const _backend_table = Dict("cpu" => nothing,
+    "cuda" => (:CUDA, :CUDABackend), "nvidia" => (:CUDA, :CUDABackend),
+    "amd" => (:AMDGPU, :ROCBackend), "roc" => (:AMDGPU, :ROCBackend),
+    "amdgpu" => (:AMDGPU, :ROCBackend),
+    "oneapi" => (:oneAPI, :oneAPIBackend), "intel" => (:oneAPI, :oneAPIBackend),
+    "metal" => (:Metal, :MetalBackend), "apple" => (:Metal, :MetalBackend))
+
+"""
+    backend_from_name(name) -> KernelAbstractions.Backend
+
+Strict resolver for backend names ("cpu", "cuda"/"nvidia", "amd"/"roc",
+"oneapi"/"intel", "metal"/"apple"); the `backend=` keyword uses it. Errors
+with an actionable message when the vendor package is not loaded or has no
+functional device. There is deliberately no auto-detection: the user (or a
+higher-level package) chooses the backend explicitly.
+"""
+function backend_from_name(name)::KernelAbstractions.Backend
+    key = lowercase(string(name))
+    haskey(_backend_table, key) ||
+        error("unknown backend `$(name)` (expected \"cpu\", \"cuda\", \"amd\", \"oneapi\" or \"metal\")")
+    spec = _backend_table[key]
+    spec === nothing && return KernelAbstractions.CPU()
+    pkg, sym = spec
+    mod = _loaded_vendor_module(String(pkg))
+    mod === nothing &&
+        error("backend \"$(name)\" requires $(pkg).jl — run `using $(pkg)` first")
+    isdefined(mod, sym) ||
+        error("$(pkg).jl is loaded but does not define $(sym) (version mismatch?)")
+    if isdefined(mod, :functional) && !mod.functional()
+        error("backend \"$(name)\" was requested but no functional device was detected")
+    end
+    return getproperty(mod, sym)()
+end
+
+"""
+    move_to_backend(B, a)
+
+Move the array `a` to the backend `B` (a no-op when `a` is already there).
+"""
+function move_to_backend(B::KernelAbstractions.Backend, a::AbstractArray)
+    KernelAbstractions.get_backend(a) == B && return a
+    d = KernelAbstractions.zeros(B, eltype(a), size(a))
+    copyto!(d, a)
+    return d
+end
+
 """
     to_backend(like, a)
 
-Move the host array `a` to the backend where `like` lives ("backend follows
-the data"). Base fallback: return `a` unchanged (CPU semantics); the package
-extensions override this for their device array types
-(`to_backend(like::CuArray, a) = CuArray(a)` for CUDA, and likewise for
-AMDGPU/oneAPI/Metal).
+Move the array `a` to the backend where `like` lives ("backend follows the
+data"); a no-op when both live on the same backend.
 """
-to_backend(like::AbstractArray, a::AbstractArray) = a
+to_backend(like::AbstractArray, a::AbstractArray) =
+    move_to_backend(KernelAbstractions.get_backend(like), a)
 
-# resolve a backend given by name ("cpu", "cuda", "amd", "oneapi", "metal");
-# errors when the requested GPU package is not installed or not functional
-function _backend_from_name(name::AbstractString)
-    key = lowercase(name)
-    table = Dict("cpu" => 0, "cuda" => 1, "nvidia" => 1, "amd" => 2, "roc" => 2,
-                 "amdgpu" => 2, "oneapi" => 3, "intel" => 3, "metal" => 4,
-                 "apple" => 4)
-    haskey(table, key) ||
-        error("unknown backend `$(name)` (expected \"cpu\", \"cuda\", \"amd\", \"oneapi\" or \"metal\")")
-    id = table[key]
-    id == 0 && return CPU()
-    pkg = ("CUDA", "AMDGPU", "oneAPI", "Metal")[id]
-    Base.find_package(pkg) === nothing &&
-        error("backend \"$(name)\" requires $(pkg).jl, which is not installed")
-    b = all_backends[id]
-    b isa CPU && error("backend \"$(name)\" is not available: $(pkg).jl is loaded " *
-                       "but no functional GPU was detected")
-    return b
+function kernel_array(B::KernelAbstractions.Backend, a::AbstractArray)
+    return move_to_backend(B, a)
 end
 
-function kernel_array(a::Array)
-    if default_backend[] == CPU()
-        return a
-    end
-    A = KernelAbstractions.zeros(default_backend[], eltype(a), size(a))
-    copyto!(A, a)
-    return A
+function create_zeros(B::KernelAbstractions.Backend, ::Type{T}, dims...) where {T}
+    return KernelAbstractions.zeros(B, T, dims)
 end
 
-function create_zeros(::Type{T}, dims...) where {T}
-    return KernelAbstractions.zeros(default_backend[], T, dims)
-end
-
-function create_ones(::Type{T}, dims...) where {T}
-    return KernelAbstractions.ones(default_backend[], T, dims)
+function create_ones(B::KernelAbstractions.Backend, ::Type{T}, dims...) where {T}
+    return KernelAbstractions.ones(B, T, dims)
 end
 
 end

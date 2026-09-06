@@ -33,10 +33,10 @@ Measured with the default `N` on a fresh Julia session (times include
 one-time JIT compilation), 2× NVIDIA A100, Julia 1.12. `relerr` is the
 relative error of the compressed matvec against the exact kernel. The CPU
 columns are the scripts' main (CPU) section; the CUDA columns come from the
-closing GPU section of each script — except `hmatrix_vector.jl`, which runs
-on a single automatically selected backend: its CPU row is the script's
-CPU-only path (what a CPU-only system or CI runs), its CUDA row the
-GPU-device path.
+closing GPU section of each script — except `hmatrix_vector.jl`, which picks
+one backend at startup (CUDA when available, CPU otherwise): its CPU row is
+the script's CPU-only path (what a CPU-only system or CI runs), its CUDA row
+the GPU-device path.
 
 | Script | assembly | compression | rank | matvec | relerr | assembly (CUDA) | matvec (CUDA) | relerr (CUDA) |
 | :-- | --: | --: | :-- | --: | --: | --: | --: | --: |
@@ -66,18 +66,21 @@ julia --project=. examples/scalar_laplace2d.jl        # default N
 julia --project=. examples/scalar_laplace3d.jl 2000   # custom N
 ```
 
-**CPU:** every script runs entirely on the CPU out of the box. The library
-declares the GPU packages as weak dependencies, so the project environment
-does not install them and the GPU sections are skipped cleanly.
+**CPU:** every script runs entirely on the CPU out of the box — without a GPU
+package in the environment, `backend_from_name("cuda")` fails and the scripts
+fall back to the CPU cleanly (no GPU sections run).
 
 **GPU:** when the *current Julia environment* has one of `CUDA`, `AMDGPU`,
 `oneAPI` or `Metal` installed (with a functional device), `HMatrixGPU.@using_gpu()`
-loads it and the GPU section of each script activates automatically — rebuild
-with `backend="cuda"`, run the matvec on the device, validate, and switch
-back. To run on a GPU, use any environment that has the matching GPU package
-installed alongside HMatrixGPU.jl. There is no `using CUDA` in any example;
-the library's portable hooks (`create_zeros`, `to_backend`, `kernel_array`)
-do the backend dispatch, and `Array(y)` is the only synchronization.
+loads it and `HMatrixGPU.backend_from_name("cuda")` resolves the backend —
+there is no auto-detection and no global state: the scripts pass the chosen
+backend object explicitly to every construction (`backend=B`) and every
+allocation (`create_zeros(B, ...)`), and fall back to the CPU in a
+`try`/`catch` when no functional device is present. Rebuild with
+`backend=B`, run the matvec on the device, validate, and continue on the CPU
+independently. To run on a GPU, use any environment that has the matching GPU
+package installed alongside HMatrixGPU.jl. There is no `using CUDA` in any
+example; `Array(y)` is the only synchronization.
 
 ## Which example should I start from?
 

@@ -4,7 +4,6 @@ using HMatrixGPU
 using Test
 Random.seed!(10)
 
-set_backend("cpu")
 N = 1000;
 
 X = [[sin(i * 2π / N), cos(i * 2π / N), 0] for i in 1:N]
@@ -32,9 +31,9 @@ cluster_source = ClusterTree(pts; max_points_per_leaf=64, dims=3)
 
 # build + matvec with a multi-component source, run on every available
 # backend via test_functions
-function test_hmatrix_vector_matvec()
+function test_hmatrix_vector_matvec(B)
     hmatrix = HMatrix(K, cluster_targets, cluster_source; eta=1.5, eps=1e-6,
-                      row_block_size=1, col_block_size=3)
+                      row_block_size=1, col_block_size=3, backend=B)
 
     @test length(Set(cluster_targets.index_map)) == N
     @test length(Set(cluster_source.index_map)) == 3 * N
@@ -48,7 +47,7 @@ function test_hmatrix_vector_matvec()
     @test !any(isnan, Array(hmatrix.u_data))
 
     x = rand(3 * N)
-    xd = HMatrixGPU.create_zeros(Float64, 3 * N)
+    xd = HMatrixGPU.create_zeros(B, Float64, 3 * N)
     copyto!(xd, x)
     @test norm(K * x - Array(hmatrix * xd)) / norm(K * x) < 1e-4
 end

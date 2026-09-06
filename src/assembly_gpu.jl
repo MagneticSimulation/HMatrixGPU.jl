@@ -24,15 +24,6 @@ function device_svd_available(B)::Bool
     end
 end
 
-# upload `a` to the backend `B` unless it is already there
-# (temporary location — moves to src/HMatrixGPU.jl with the stateless flip)
-function move_to_backend(B::KernelAbstractions.Backend, a::AbstractArray)
-    KernelAbstractions.get_backend(a) == B && return a
-    d = KernelAbstractions.zeros(B, eltype(a), size(a))
-    copyto!(d, a)
-    return d
-end
-
 # block gather: out[ii, jj] = Kmat[tmap[rs + ii - 1], smap[cs + jj - 1]] for the
 # cluster ranges (rs:re, cs:ce). Plain index arithmetic instead of device-side
 # fancy indexing, whose semantics are not guaranteed across vendors; host

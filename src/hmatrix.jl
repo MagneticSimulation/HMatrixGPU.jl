@@ -56,10 +56,34 @@ end
 Base.size(h::HMatrix) = (h.m, h.n)
 
 # GPU batched dense-K assembly: generic over KernelAbstractions backends with a
-# working device svd (src/assembly_gpu.jl); the CUDA extension keeps a
-# CUDA-specialized method that takes precedence. When the probe fails (or for
+# working device svd (src/assembly_gpu.jl). When the probe fails (or for
 # matrix-free kernels) the CPU ACA path is used.
 gpu_dense_assembly_available(B::KernelAbstractions.Backend) = device_svd_available(B)
+
+# landing backend: like= > backend= > device of the primary data > CPU()
+# (no global default — the package keeps no backend state)
+function _resolve_landing(like, backend, datas...)
+    (like !== nothing && backend !== nothing) &&
+        error("specify either `like` or `backend`, not both")
+    like !== nothing && return KernelAbstractions.get_backend(like)
+    backend !== nothing && return (backend isa KernelAbstractions.Backend ?
+                                   backend : backend_from_name(backend))
+    seen = nothing
+    for a in datas
+        # a lazy/custom kernel struct carries no backend information and
+        # KernelAbstractions.get_backend errors for array types it does not
+        # know: treat such data as host data
+        Ba = try
+            KernelAbstractions.get_backend(a)
+        catch
+            KernelAbstractions.CPU()
+        end
+        Ba isa KernelAbstractions.CPU && continue
+        seen === nothing && (seen = Ba; continue)
+        Ba == seen || error("input data lives on different backends ($seen vs $Ba)")
+    end
+    return something(seen, KernelAbstractions.CPU())
+end
 
 """
     HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
@@ -75,24 +99,32 @@ trees `X` and `Y`.
 - `Y::ClusterTree`: Cluster tree representing the source partitioning.
 - `eta::Float64`: Admissibility parameter controlling the low-rank approximation.
 - `eps::Float64`: Tolerance level for approximation error.
-- The compressed structure is backend-resident: on `set_backend("cpu")` all
-  factor arrays are ordinary CPU arrays (the same kernels run on the CPU), on
-  a GPU backend they are device arrays.
+- The compressed structure is backend-resident: on the CPU all factor arrays
+  are ordinary CPU arrays (the same kernels run on the CPU), on a GPU backend
+  they are device arrays.
 - `index_map_using_cpu`: Keep the cluster index maps on the CPU during tree
   construction (default; almost always the right choice).
 - `svd_recompress`: Recompress the ACA factors with a truncated SVD (default).
 - `backend`: where the factor arrays land — a name (`"cpu"`, `"cuda"`, `"amd"`,
-  `"oneapi"`, `"metal"`), a KernelAbstractions backend object, or `nothing`
-  (default: the global backend set with [`set_backend`](@ref)). Errors when a
-  GPU backend is requested but its package is not loaded or no functional GPU
-  was detected.
+  `"oneapi"`, `"metal"`) or a KernelAbstractions backend object. Requesting a
+  GPU backend whose vendor package is not loaded errors with
+  "run `using CUDA` first"; a loaded package without a functional device
+  errors as well (no auto-detection, no silent fallback).
 - `like::Union{Nothing,AbstractArray}`: alternative to `backend` — move all
   factor arrays to the backend where `like` lives (backend follows the data).
+- With neither keyword given, the factors follow the device of the primary
+  data `K` (a device-resident `K` keeps the matrix on its device); host data
+  defaults to the CPU.
 
 # Contracts
-- The device is fixed at construction: `like=` takes precedence over
-  `backend=`, which takes precedence over the global `set_backend`; the
-  global backend only affects constructions made after it is set.
+- The device is fixed at construction and the package keeps no backend state:
+  the landing backend is resolved as `like=` > `backend=` > the device of the
+  primary data `K` > `CPU()`. Loading a vendor package (`using CUDA`) has zero
+  side effects — it neither switches a global backend nor affects later
+  constructions in any way.
+- Instances are independent, so CPU and GPU `HMatrix` instances (even from
+  different vendors) can coexist in one process and their matvecs can be
+  interleaved freely.
 - `row_block_size`/`col_block_size` default to `nothing`, which follows the
   trees' `dims` (`X.dims`/`Y.dims`): vector problems with `dims=3` pivot one
   whole cell (3 components) per group, which prevents the anisotropy of vector
@@ -111,7 +143,12 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                  backend=nothing, like=nothing)
     eltype(K) <: Complex &&
         error("HMatrix does not support complex-valued kernels (eltype(K) = $(eltype(K)))")
-    block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu)
+
+    # resolve the landing backend (like= > backend= > device of K > CPU())
+    B = _resolve_landing(like, backend, K)
+
+    block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu,
+                           backend=B)
     merge_dense_matrices!(block_tree.root)
 
     # Traverse the block tree to gather dense and approximated blocks
@@ -119,14 +156,6 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
 
     target_map = collect(Int, block_tree.target_index_map)
     source_map = collect(Int, block_tree.source_index_map)
-    (like !== nothing && backend !== nothing) &&
-        error("specify either `like` or `backend`, not both")
-
-    # resolve the landing backend
-    B = like !== nothing ? KernelAbstractions.get_backend(like) :
-        backend === nothing ? default_backend[] :
-        backend isa KernelAbstractions.Backend ? backend :
-        _backend_from_name(string(backend))
 
     # GPU batched fast path: dense kernels on a GPU backend whose device svd
     # probe passes (src/assembly_gpu.jl). Matrix-free kernels and CPU backends
@@ -350,7 +379,7 @@ end
                       U_matrices, V_matrices, approx_block_indices) -> HMatrix
 
 Flatten the assembled blocks into the three CSR operators (near field, far-field
-`V`, far-field `U`) on the CPU and move them to the active backend. Column
+`V`, far-field `U`) on the CPU and move them to the requested backend. Column
 indices of the near field and of `V` are pre-multiplied with `source_map`, so
 the kernels read the input vector `x` in its original ordering directly.
 """
@@ -361,13 +390,8 @@ function build_csr_hmatrix(::Type{T}, m::Int, n::Int,
                            U_matrices::Vector{<:Matrix}, V_matrices::Vector{<:Matrix},
                            approx_block_indices::Vector{Tuple{Int,Int,Int,Int}};
                            backend=nothing, like=nothing) where {T}
-    # landing backend: follows `like` when given (backend follows the data),
-    # else the explicit `backend` keyword (name, backend object), else the
-    # global default_backend
-    B = like !== nothing ? KernelAbstractions.get_backend(like) :
-        backend === nothing ? default_backend[] :
-        backend isa KernelAbstractions.Backend ? backend :
-        _backend_from_name(string(backend))
+    # landing backend: like= > backend= > CPU() (no data arguments to consult)
+    B = _resolve_landing(like, backend)
     move = function (a)
         KernelAbstractions.get_backend(a) == B && return a
         dest = KernelAbstractions.zeros(B, eltype(a), size(a))

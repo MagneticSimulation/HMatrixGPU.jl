@@ -5,7 +5,7 @@
 #        dipolar demagnetization tensor between N cells (3 DOF each, so the
 #        matrix is 3N x 3N) — but evaluated the advanced way: the batched
 #        getindex that the ACA assembly queries is a KernelAbstractions
-#        kernel running on the *active backend* (GPU when available). The
+#        kernel running on the *chosen backend* (GPU when available). The
 #        kernel function is never materialized; only the queried blocks are
 #        ever computed. Kernel (R = x - y):
 #
@@ -13,13 +13,15 @@
 #
 # Run:   julia --project=. examples/hmatrix_vector.jl [N]       (default N=2000)
 #
-# GPU behavior: `HMatrixGPU.@using_gpu()` loads whichever GPU package is
-# installed (CUDA/AMDGPU/oneAPI/Metal) and `set_backend("cuda")` activates it;
-# on a CPU-only system set_backend returns false and the entire script runs
-# portably on the CPU — same code, same validation. There is no `using CUDA`
-# anywhere: the library's portable hooks (create_zeros / to_backend /
-# kernel_array) place every array on the active backend, and `Array(out)` is
-# the only synchronization needed.
+# GPU behavior: the script picks its backend once at startup — `using CUDA` is
+# never written here; `HMatrixGPU.@using_gpu()` loads whichever GPU package is
+# installed in the current environment and `backend_from_name("cuda")` resolves
+# it (falling back to the CPU without a functional GPU, so the entire script
+# runs portably on a CPU-only system — same code, same validation). The chosen
+# backend object `B` is passed explicitly everywhere (construction
+# `backend=B`, arrays via create_zeros/kernel_array), and the batch getindex
+# reads its launch backend from the data itself — there is no global state.
+# `Array(out)` is the only synchronization needed.
 # =============================================================================
 
 using HMatrixGPU
@@ -39,7 +41,9 @@ end
 
 # ---- backend selection (portable: CPU-only systems run the same script) ------
 HMatrixGPU.@using_gpu()
-gpu_ok = set_backend("cuda")    # false → everything below runs on the CPU
+B = try HMatrixGPU.backend_from_name("cuda") catch
+    KernelAbstractions.CPU()        # examples target CUDA (the validated vendor)
+end
 
 # ---- configuration ----------------------------------------------------------
 N = isempty(ARGS) ? 2000 : parse(Int, ARGS[1])
@@ -79,12 +83,11 @@ pts = rand(MersenneTwister(10), 3, N)
     end
 end
 
-# Lazy kernel: holds the coordinates on the *active backend* (kernel_array
-# moves them to the GPU when one is active) plus a host copy for the dense
-# reference below.
+# Lazy kernel: holds the coordinates on the chosen backend (kernel_array moves
+# them there) plus a host copy for the dense reference below.
 struct DipolarDemagGPU <: AbstractMatrix{Float64}
-    Xd::AbstractMatrix{Float64}     # target coordinates, 3 x N, active backend
-    Yd::AbstractMatrix{Float64}     # source coordinates, 3 x N, active backend
+    Xd::AbstractMatrix{Float64}     # target coordinates, 3 x N, backend of B
+    Yd::AbstractMatrix{Float64}     # source coordinates, 3 x N, backend of B
     P::Matrix{Float64}              # host copy (dense reference materialization)
 end
 
@@ -108,20 +111,23 @@ function Base.getindex(K::DipolarDemagGPU, i::Int, j::Int)
 end
 
 # Batch entry — the only form the ACA assembly queries. Output and index sets
-# are created on the active backend, the block is evaluated by the kernel
-# above, and the result is returned to the host (assembly consumes blocks on
-# the host; a real large-scale application could keep them on the device).
+# are created on the backend the coordinates live on (data-driven — the launch
+# backend comes from the data, no global backend is read), the block is
+# evaluated by the kernel above, and the result is returned to the host
+# (assembly consumes blocks on the host; a real large-scale application could
+# keep them on the device).
 function Base.getindex(K::DipolarDemagGPU, I::AbstractVector{Int}, J::AbstractVector{Int})
-    out = HMatrixGPU.create_zeros(Float64, length(I), length(J))
+    bk = KernelAbstractions.get_backend(K.Xd)
+    out = HMatrixGPU.create_zeros(bk, Float64, length(I), length(J))
     Id = HMatrixGPU.to_backend(out, collect(I))
     Jd = HMatrixGPU.to_backend(out, collect(J))
-    kernel! = eval_dipolar_block!(HMatrixGPU.default_backend[], 256)
+    kernel! = eval_dipolar_block!(bk, 256)
     kernel!(out, K.Xd, K.Yd, Id, Jd, length(I), length(J);
             ndrange=(length(I), length(J)))
     return Array(out)       # Array() also synchronizes on GPUs
 end
 
-K = DipolarDemagGPU(HMatrixGPU.kernel_array(pts), HMatrixGPU.kernel_array(pts), pts)
+K = DipolarDemagGPU(HMatrixGPU.kernel_array(B, pts), HMatrixGPU.kernel_array(B, pts), pts)
 println("  kernel coordinates live on: ", typeof(K.Xd))
 
 # ---- cluster trees: dims=3 puts whole cells (3 DOF) in every tree node -------
@@ -130,7 +136,7 @@ Yc = ClusterTree(pts; max_points_per_leaf=64, dims=dims)
 
 # ---- build (lazy K always assembles through the CPU ACA; the block sizes
 #      default to the trees' dims — one cell per pivot group) ------------------
-t_asm = @elapsed H = HMatrix(K, Xc, Yc; eta=eta, eps=eps)
+t_asm = @elapsed H = HMatrix(K, Xc, Yc; eta=eta, eps=eps, backend=B)
 st = info(H)
 
 # ---- validate against the dense reference ------------------------------------
@@ -138,14 +144,14 @@ st = info(H)
 # feasible at example sizes.
 Kdense = Matrix(K)
 x = rand(MersenneTwister(42), 3 * N)
-xg = HMatrixGPU.create_zeros(Float64, size(K, 2)); copyto!(xg, x)
+xg = HMatrixGPU.create_zeros(B, Float64, size(K, 2)); copyto!(xg, x)
 yg = Array(H * xg)              # Array() also synchronizes
 t_mv = best_of(() -> Array(H * xg), 20)
 relerr = norm(Kdense * x - yg) / norm(Kdense * x)
 relerr < 1e-5 || error("validation failed: relerr=$relerr")
 
 # ---- report -------------------------------------------------------------------
-backend_name = HMatrixGPU.default_backend[] isa KernelAbstractions.CPU ? "CPU" : "CUDA"
+backend_name = B isa KernelAbstractions.CPU ? "CPU" : "CUDA"
 @printf("[demag-device] N=%d (%dx%d) backend=%s eta=%g eps=%g\n",
         N, 3 * N, 3 * N, backend_name, eta, eps)
 @printf("  assembly %.1fs | leaves %d (near %d / approx %d) | rank %d-%d | compression %.1fx\n",

@@ -16,7 +16,8 @@ struct BlockTree
 end
 
 """
-    BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5)
+    BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5, index_map_using_cpu=true,
+              backend=KernelAbstractions.CPU())
 
 Constructs a block tree based on the target and source cluster trees `X` and `Y`.
 The parameter `eta` controls the admissibility condition, defining when a node is considered low-rank
@@ -26,9 +27,13 @@ and can be represented by a low-rank approximation.
 - `X`: Cluster tree representing the target points.
 - `Y`: Cluster tree representing the source points.
 - `eta`: Threshold parameter controlling the admissibility condition.
+- `index_map_using_cpu`: Keep the cluster index maps on the CPU (default).
+- `backend`: with `index_map_using_cpu=false`, the backend the index maps are
+  moved to (defaults to the CPU).
 
 """
-function BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5, index_map_using_cpu=true)
+function BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5, index_map_using_cpu=true,
+                   backend=KernelAbstractions.CPU())
     # Initialize the root node with the target and source cluster roots
     root = BlockTreeNode(X.root, Y.root, false, false, nothing, nothing)
 
@@ -40,7 +45,8 @@ function BlockTree(X::ClusterTree, Y::ClusterTree; eta=1.5, index_map_using_cpu=
     end
 
     # Return the constructed BlockTree with target and source index mappings
-    return BlockTree(kernel_array(X.index_map), kernel_array(Y.index_map), root)
+    return BlockTree(kernel_array(backend, X.index_map),
+                     kernel_array(backend, Y.index_map), root)
 end
 
 """

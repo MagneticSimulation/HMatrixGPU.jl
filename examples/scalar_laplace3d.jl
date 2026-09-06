@@ -15,6 +15,7 @@
 # =============================================================================
 
 using HMatrixGPU
+using KernelAbstractions
 using LinearAlgebra
 using Random
 using Printf
@@ -108,18 +109,21 @@ relerr < 1e-5 || error("validation failed: relerr=$relerr")
 # ---- optional GPU section ------------------------------------------------------
 # The compressed factors land on the CUDA device (lazy K still assembles via
 # the CPU ACA); the matvec then runs as fused GPU kernels. `eps` is a relative
-# tolerance, so the accuracy is identical on both backends.
-HMatrixGPU.@using_gpu()             # loads whichever GPU package is installed
-if set_backend("cuda")              # returns false (clean skip) without a GPU
-    t_asm_g = @elapsed Hg = HMatrix(K, Xc, Yc; eta=eta, eps=eps, backend="cuda")
-    xg = HMatrixGPU.create_zeros(Float64, size(K, 2)); copyto!(xg, x)
+# tolerance, so the accuracy is identical on both backends. No global backend
+# state: the landing backend is chosen per construction.
+HMatrixGPU.@using_gpu()             # loads whichever GPU package the env provides
+B = try HMatrixGPU.backend_from_name("cuda") catch
+    KernelAbstractions.CPU()        # examples target CUDA (the validated vendor)
+end
+if !(B isa KernelAbstractions.CPU)
+    t_asm_g = @elapsed Hg = HMatrix(K, Xc, Yc; eta=eta, eps=eps, backend=B)
+    xg = HMatrixGPU.create_zeros(B, Float64, size(K, 2)); copyto!(xg, x)
     yg = Array(Hg * xg)             # Array() also synchronizes
     t_mv_g = best_of(() -> Array(Hg * xg), 20)
     relerr_g = norm(Kdense * x - yg) / norm(Kdense * x)
     relerr_g < 1e-5 || error("GPU validation failed: $relerr_g")
     @printf("  gpu: assembly %.1fs | matvec %.2f ms (best of 20) | relerr %.1e  [PASS]\n",
             t_asm_g, 1e3 * t_mv_g, relerr_g)
-    set_backend("cpu")
 end
 
 # Teaching note on `eta`: the admissibility condition dist > eta*(r_X + r_Y)

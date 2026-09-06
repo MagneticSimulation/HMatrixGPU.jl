@@ -27,10 +27,13 @@ finite-element demagnetization field in
   `AbstractMatrix` (including a lazy kernel evaluation on the GPU).
 - **Flat, Structure-of-Arrays layout** of the 𝓗-matrix so the matvec runs as a
   handful of fused GPU kernels instead of recursive tree traversals.
-- **Multi-backend** via KernelAbstractions: CPU, CUDA, AMDGPU, oneAPI and Metal
-  (enabled by simply loading the corresponding package). There is a single
-  `HMatrix` type — the device placement follows the data (`like=` keyword or
-  the global backend), and CPU and GPU instances can coexist.
+- **Multi-backend** via KernelAbstractions: CPU, CUDA, AMDGPU, oneAPI and Metal.
+  The package itself has zero GPU dependencies — the vendor package is the
+  user's choice and is simply loaded with `using` (loading it has zero side
+  effects on HMatrixGPU). Where an `HMatrix` lands is decided per instance
+  (`backend=` or `like=` keyword, else the device of the data), and with no
+  global backend state, CPU and GPU instances — even from different vendors —
+  coexist in one process and interleave freely.
 
 Runnable application examples (scalar BEM, covariance, vector demagnetization
 kernels) are in [examples/](examples/README.md).
@@ -43,14 +46,13 @@ Pkg.add(url = "https://github.com/MagneticSimulation/HMatrixGPU.jl")
 ```
 
 The package is not yet registered in the General registry. To use a GPU, install
-one of `CUDA`, `AMDGPU`, `oneAPI` or `Metal` alongside the package.
+one of `CUDA`, `AMDGPU`, `oneAPI` or `Metal` alongside the package and load it
+with `using`.
 
 ## Quick start (CPU)
 
 ```julia
 using HMatrixGPU, LinearAlgebra
-
-set_backend("cpu")
 
 # 2000 points on a ring
 N = 2000
@@ -85,19 +87,19 @@ accuracy is independent of the scale of the kernel.
 ## GPU usage
 
 ```julia
-using HMatrixGPU, CUDA   # loading CUDA.jl activates the CUDA backend automatically
+using HMatrixGPU, CUDA   # the vendor package is loaded explicitly by the user
 
-# Alternatively:
-# set_backend("cuda")     # or "amd", "oneapi", "metal", "cpu"
-```
-
-The `HMatrix` stores all blocks in flat device arrays so that the matvec runs
-as three kernels (a permutation, `V*x`, and a fused near-field/`U` kernel):
-
-```julia
-H = HMatrix(K, X, Y; eta = 1.0, eps = 1e-6)
+H = HMatrix(K, X, Y; eta = 1.0, eps = 1e-6, backend = "cuda")
 y = H * x            # x must already live on the GPU (e.g. CuArray)
 ```
+
+`backend="cuda"` resolves the loaded CUDA package at construction time — there
+is no auto-detection and no global state: the user (or a higher-level package)
+chooses the backend, the library implements the functionality. The CPU and GPU
+matrices above are independent instances and can be used interleaved.
+
+The `HMatrix` stores all blocks in flat device arrays so that the matvec runs
+as three kernels (a permutation, `V*x`, and a fused near-field/`U` kernel).
 
 For large matrices you typically do not want to materialize `K` at all: define a
 batched `getindex(K, I::Vector{Int}, J::Vector{Int})` that evaluates your kernel
@@ -113,16 +115,24 @@ A complete, runnable example (the dipolar demag tensor on a GPU) is provided in
 
 ## Backend options
 
-| `set_backend` option | Hardware  | KernelAbstractions backend |
-| :------------------- | :-------- | :------------------------- |
-| `"cpu"`              | CPU       | `KernelAbstractions.CPU()` |
+The landing backend of an `HMatrix` is resolved per construction:
+`like=` > `backend=` > the device of the primary data (`K`) > `CPU()`. There is
+no global backend state and no auto-detection — the user chooses the backend,
+the package implements the functionality.
+
+| `backend=` name     | Hardware  | KernelAbstractions backend |
+| :------------------ | :-------- | :------------------------- |
+| `"cpu"`             | CPU       | `KernelAbstractions.CPU()` |
 | `"cuda"` / `"nvidia"`| NVIDIA GPU| `CUDA.CUDABackend()`       |
 | `"amd"` / `"roc"`    | AMD GPU   | `AMDGPU.ROCBackend()`      |
 | `"oneapi"` / `"intel"` | Intel GPU | `oneAPI.oneAPIBackend()` |
 | `"metal"` / `"apple"` | Apple GPU | `Metal.MetalBackend()`   |
 
-Loading one of `CUDA`, `AMDGPU`, `oneAPI` or `Metal` automatically selects the
-corresponding backend.
+`backend=` also accepts a KernelAbstractions backend object directly, and
+`like=<array>` places the factors next to `like`. Requesting a GPU backend
+whose vendor package is not loaded errors with "run `using CUDA` first"; a
+loaded package without a functional device errors as well. For a soft fallback
+in scripts, wrap the request in `try`/`catch` — see the examples.
 
 ## Documentation
 

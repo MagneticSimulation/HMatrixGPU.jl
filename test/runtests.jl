@@ -1,7 +1,6 @@
 using HMatrixGPU
 using Test
 
-set_backend("cpu")
 include("test_utils.jl")
 
 @testset "HMatrixGPU.jl" begin

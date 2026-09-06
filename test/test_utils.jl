@@ -1,29 +1,17 @@
 using Printf
+using KernelAbstractions
 using Test
 
 # Run each function in `funcs` under every backend listed in `platforms`.
-# A platform is skipped when its GPU package is not loadable or when
-# `set_backend` reports it as unavailable (e.g. CUDA installed on a
-# CPU-only CI runner), so the same suite covers CPU on CI and GPU locally.
-# The global backend is restored to CPU afterwards.
+# A platform is skipped when its GPU package is not installed, not loadable,
+# or has no functional device (e.g. CUDA installed on a CPU-only CI runner),
+# so the same suite covers CPU on CI and GPU locally. The package keeps no
+# backend state: every construction receives its backend explicitly (f(B)).
 function test_functions(test_name, funcs...;
                         platforms=["CPU", "CUDA", "AMDGPU", "oneAPI", "Metal"])
     for platform in platforms
-        if platform != "CPU"
-            if Base.find_package(platform) === nothing
-                continue
-            end
-            try
-                Base.eval(Main, :(using $(Symbol(platform))))
-            catch
-                continue
-            end
-        end
-
-        if !set_backend(platform)
-            continue
-        end
-
+        B = _test_backend(platform)
+        B === nothing && continue
         name = @sprintf("%s %s", test_name, platform)
         @testset "$name" begin
             for func in funcs
@@ -31,10 +19,29 @@ function test_functions(test_name, funcs...;
                 # above, whose new methods are not visible to code running
                 # in the current world age; invokelatest re-enters at the
                 # latest world so freshly loaded backends are picked up
-                Base.invokelatest(func)
+                Base.invokelatest(func, B)
             end
         end
     end
-    set_backend("cpu")
     return nothing
+end
+
+# the backend for a platform name: CPU() for "CPU", nothing when the vendor
+# package is missing/not loadable/not functional (platform skipped)
+function _test_backend(platform)
+    platform == "CPU" && return KernelAbstractions.CPU()
+    Base.find_package(platform) === nothing && return nothing
+    try
+        Base.eval(Main, :(using $(Symbol(platform))))
+    catch
+        return nothing
+    end
+    # eval-loaded methods do not advance this task's world age
+    return Base.invokelatest() do
+        try
+            HMatrixGPU.backend_from_name(lowercase(platform))
+        catch
+            nothing          # not functional here (e.g. GPU-less CI) → skip
+        end
+    end
 end
