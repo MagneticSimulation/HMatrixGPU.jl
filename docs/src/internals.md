@@ -251,12 +251,12 @@ on the host.
 ## Backend resolution
 
 The package keeps no backend state; every constructor resolves the landing
-backend through `_resolve_landing(like, backend, datas...)`:
-
-1. `like=` — the backend of the given array;
-2. `backend=` — a backend object, or a name resolved by `backend_from_name`;
-3. the device of the primary data (skipping host arrays; mixed devices error);
-4. `CPU()`.
+backend through `_resolve_backend(backend)`: the explicit `backend=` keyword —
+a backend object, or a name resolved by `backend_from_name` — with `CPU()`
+when no keyword is given. Device-resident inputs are downloaded once during
+construction and do not decide the placement; the matvec's same-backend check
+is the safety net (API_DESIGN v1.1: no `like=`, no device inference — the
+placement is always explicit).
 
 `backend_from_name` maps names through a small table (`"cuda"`/`"nvidia"` →
 CUDA, `"amd"`/`"roc"`/`"amdgpu"` → AMDGPU, `"oneapi"`/`"intel"` → oneAPI,

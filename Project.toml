@@ -1,7 +1,7 @@
 name = "HMatrixGPU"
 uuid = "013f6237-6334-43e6-9487-c09b3879e29b"
 authors = ["Weiwei Wang"]
-version = "0.1.0"
+version = "1.0.0"
 
 [deps]
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
@@ -18,7 +18,7 @@ HMatrixGPUPlotsExt = "Plots"
 
 [compat]
 CUDA = "5, 6"
-KernelAbstractions = "0.9.30"
+KernelAbstractions = "0.9"
 Plots = "1"
 julia = "1.10"
 

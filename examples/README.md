@@ -39,7 +39,7 @@ Every script follows the same contract:
 ## Measured numbers
 
 Measured with the default `N` on a fresh Julia session (times include
-one-time JIT compilation), 2× NVIDIA A100, Julia 1.12. `relerr` is the
+one-time JIT compilation), an NVIDIA A100, Julia 1.12. `relerr` is the
 relative error of the compressed matvec against the exact kernel. The CPU
 columns are the scripts' main (CPU) section; the CUDA columns come from the
 closing GPU section of each script — except `hmatrix_vector.jl`, which picks

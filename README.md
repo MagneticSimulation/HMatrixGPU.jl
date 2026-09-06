@@ -46,12 +46,11 @@ kernels) are in [examples/](examples/README.md).
 
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/MagneticSimulation/HMatrixGPU.jl")
+Pkg.add("HMatrixGPU")
 ```
 
-The package is not yet registered in the General registry. To use a GPU, install
-one of `CUDA`, `AMDGPU`, `oneAPI` or `Metal` alongside the package and load it
-with `using`.
+To use a GPU, install one of `CUDA`, `AMDGPU`, `oneAPI` or `Metal` alongside
+the package and load it with `using`.
 
 ## Quick start (CPU)
 

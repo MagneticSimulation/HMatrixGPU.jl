@@ -216,37 +216,39 @@ and is immune to component anisotropy.
 
 ## Backends and devices
 
-The landing device of an [`HMatrix`](@ref) is fixed at construction, from one
-chain (no global default exists):
+The landing device of an [`HMatrix`](@ref) is fixed at construction by the
+explicit `backend=` keyword (no global default exists):
 
 ```text
-like=  >  backend=  >  device of the primary data  >  CPU()
+backend= (name or Backend object)  >  CPU() when no keyword is given
 ```
 
 - `backend=` accepts a name (`"cuda"`, ...) or a backend object
   (`CUDA.CUDABackend()`); the name is resolved strictly and errors when the
   vendor package is not loaded or has no functional device (see
   [getting started](getting-started.md)).
-- The **primary data** is `K` for the low-level constructor and the point set
-  for the high-level ones — device follows data. Explicit `like=`/`backend=`
-  always win over the data: with a keyword given, even mixed-device target and
-  source point sets are accepted (each device-resident set is downloaded once).
-  When the landing device is decided from the data instead, mixing devices
-  between target and source points is an error.
-- Device point sets are downloaded **once** during construction: trees and
-  high-level kernels are host-side; what ends up on the device is the three
-  CSR operators, the index maps and the product buffers (moved at
-  construction), plus the internal quantities of the GPU dense fast path.
-- The host coordinates (`pts`, tree coordinates, `KernelMatrix` targets and
-  sources) always stay on the host.
+- Device-resident inputs are legal but never decide the placement: a device
+  `K` or point set (`CuArray(pts)`) is downloaded **once** during
+  construction (trees and high-level kernel evaluation are host-side
+  algorithms), and the matrix lands on `backend=`, else `CPU()`.
+- To place an instance next to an existing array, ask for its backend
+  explicitly:
+
+```julia
+h = HMatrix(K, X, Y; backend = KernelAbstractions.get_backend(x), ...)
+```
+
+- What ends up on the device is the three CSR operators, the index maps and
+  the product buffers (moved at construction), plus the internal quantities
+  of the GPU dense fast path; the host coordinates (`pts`, tree coordinates,
+  `KernelMatrix` targets and sources) always stay on the host.
 
 **The matvec has a hard same-device contract**: `x`, `y` and the
 [`HMatrix`](@ref) must live on the same device. `x` is never transferred for
-you — the same principle as construction-time data-following, applied at call
-time (data lands where it should, once; nothing is moved implicitly per
-call). A mismatch is detected with a clear error; `H * x` allocates the
-result on the matrix's backend. `LinearAlgebra.mul!(y, H, x)` fully
-overwrites `y`.
+you — nothing is moved implicitly, at construction or per call. A mismatch is
+detected with a clear error (this check is the safety net for a
+mis-requested placement); `H * x` allocates the result on the matrix's
+backend. `LinearAlgebra.mul!(y, H, x)` fully overwrites `y`.
 
 Because nothing is global, CPU and GPU instances — different backends, even
 different vendors — coexist in one process and can be multiplied in
@@ -269,8 +271,8 @@ Which assembly runs depends on `K`, not on the interface tier:
   blocks fall back to dense storage (see [known issues](known-issues.md)).
   If the device-SVD probe fails, the path is not taken and assembly falls
   back to the CPU ACA.
-- **Dense device-resident `K`** (e.g. a `CuArray`): not on the fast path in
-  v1.0 — it assembles through the CPU ACA, which queries the device matrix
+- **Dense device-resident `K`** (e.g. a `CuArray`): not on the fast path —
+  it assembles through the CPU ACA, which queries the device matrix
   block by block (works, but slow at scale).
 
 ## Diagnostics

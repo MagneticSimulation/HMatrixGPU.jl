@@ -2,12 +2,9 @@
 
 ## Installation
 
-HMatrixGPU.jl is not yet registered in the Julia General registry. Install it
-directly from GitHub:
-
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/MagneticSimulation/HMatrixGPU.jl")
+Pkg.add("HMatrixGPU")
 ```
 
 The package itself has **zero GPU dependencies** — its only non-stdlib
@@ -18,25 +15,19 @@ yourself (`using CUDA`); loading it has no side effects on the library.
 
 ## The backend model
 
-There is **no global backend** to switch and no automatic detection: the
-package keeps no backend state, and the landing device is chosen *per
-instance*, at construction time, through (in order of priority)
+There is no automatic detection: the package keeps no backend state, and the
+landing device is chosen *per instance*, at construction time, through
 
-1. `like = <array>` — place the matrix next to the given array;
-2. `backend = <name or object>` — `"cpu"`, `"cuda"`, `"amd"`, `"oneapi"`,
+1. `backend = <name or object>` — `"cpu"`, `"cuda"`, `"amd"`, `"oneapi"`,
    `"metal"` (or a vendor alias such as `"nvidia"`), or a backend object such
    as `CUDA.CUDABackend()`;
-3. **the device of the primary data** — device follows data: for the low-level
-   constructor this is `K`, for the high-level constructors it is the point
-   set (device point sets are downloaded once during construction);
-4. `CPU()` — when none of the above says anything.
+2. `CPU()` — when no keyword is given.
 
-Explicit keywords always win over the data. When the landing device is decided
-from the data instead (no explicit keyword), target and source points living on
-*different* devices are an error; with an explicit keyword, mixed-device point
-sets are accepted — each is downloaded once and the matrix lands where the
-keyword says. A `HMatrix` stays where it was built: its
-factors and the matvec are fixed to that device.
+Device-resident inputs (`K` or point sets on a GPU) are legal: they are
+downloaded once during construction, but they do not decide the placement.
+An `HMatrix` stays where it was built: its factors and the matvec are fixed
+to that device, and a cross-device matvec errors out — the safety net for a
+mis-requested placement.
 
 | `backend=` name | Hardware | Vendor package | Backend object |
 | :--------------------- | :--------- | :------------- | :------------------------- |
@@ -50,14 +41,15 @@ Because there is no global state, CPU and GPU instances — even from different
 vendors — coexist in the same process and can be multiplied in alternation.
 
 `HMatrixGPU.backend_from_name(name)` is the strict resolver that the `backend=`
-keyword uses internally. It errors — rather than guessing — when the vendor
-package is not loaded (``backend "cuda" requires CUDA.jl — run `using CUDA`
-first``) or has no functional device (``backend "cuda" was requested but no
-functional device was detected``). There is deliberately no `"gpu"` auto-choice
-and no silent fallback: a script that wants a soft fallback wraps the call in
-`try`/`catch` itself. The `@using_gpu()` macro is a plain convenience loader —
-it loads whichever vendor package the environment provides and does nothing
-else.
+keyword uses internally — it errors, rather than guessing, when the vendor
+package is not loaded
+(``backend "cuda" requires CUDA.jl — run `using CUDA` first``)
+or has no functional device
+(``backend "cuda" was requested but no functional device was detected``).
+There is deliberately no `"gpu"` auto-choice and no silent fallback: a script
+that wants a soft fallback wraps the call in `try`/`catch` itself. The
+`@using_gpu()` macro is a plain convenience loader — it loads whichever vendor
+package the environment provides and does nothing else.
 
 ## A first example (CPU)
 
@@ -116,11 +108,9 @@ end
 y = H * CuArray(x)   # the matvec runs on the device; x is never moved for you
 ```
 
-Equivalent spellings for the same landing device: `backend = CUDA.CUDABackend()`,
-`like = some_cuda_array`, or no keyword at all when the points themselves live
-on the GPU (`HMatrix(g, CuArray(pts); ...)`). Vectors passed to `H * x` /
-`mul!` must live on the same device as the matrix — the library does not
-transfer them for you.
+`backend = CUDA.CUDABackend()` — the backend object — is an equivalent
+spelling. Vectors passed to `H * x` / `mul!` must live on the same device as
+the matrix — the library does not transfer them for you.
 
 And because nothing is global, both worlds coexist in one process:
 

@@ -38,12 +38,12 @@ implementation):
 | Form | Signature | Notes |
 | :--- | :-------- | :---- |
 | kernel + point set (square; do-block friendly) | `HMatrix(g::Function, pts; dims = 1, max_points_per_leaf = 32, kwargs...)` | targets = sources = `pts` |
-| kernel + point sets (rectangular) | `HMatrix(g::Function, pts_t, pts_s; dims = 1, max_points_per_leaf = 32, backend = nothing, like = nothing, kwargs...)` | point sets on different devices error unless an explicit `backend=`/`like=` is given |
+| kernel + point sets (rectangular) | `HMatrix(g::Function, pts_t, pts_s; dims = 1, max_points_per_leaf = 32, kwargs...)` | device point sets are legal (downloaded once); the placement is `backend=` (default `CPU()`) |
 | kernel + custom trees | `HMatrix(g::Function, X::ClusterTree, Y::ClusterTree; dims = nothing, kwargs...)` | `dims` defaults to the trees' `dims`; a mismatch errors |
-| own lazy `K` + point sets | `HMatrix(K::AbstractMatrix, pts_t, pts_s; dims = 1, max_points_per_leaf = 32, kwargs...)` | the library builds the trees; the landing device follows `K` |
+| own lazy `K` + point sets | `HMatrix(K::AbstractMatrix, pts_t, pts_s; dims = 1, max_points_per_leaf = 32, kwargs...)` | the library builds the trees; lands on `backend=` (default `CPU()`) |
 
 `kwargs...` are the low-level keywords (`eta`, `eps`, `index_map_using_cpu`,
-`svd_recompress`, `row_block_size`, `col_block_size`, `backend`, `like`).
+`svd_recompress`, `row_block_size`, `col_block_size`, `backend`).
 `HMatrix(pts; ...) do x, y ... end` is the do-block spelling of the first form.
 The contracts (kernel sentence, `dims` layout, backend resolution) are
 described on the [manual](manual.md) page.
@@ -84,8 +84,8 @@ KernelAbstractions (documented here by signature):
 - `@using_gpu()` — try-load the four vendor packages (`CUDA`, `AMDGPU`,
   `oneAPI`, `Metal`); a plain convenience loader with no selection logic.
 
-The backend resolution rules (the `like=` > `backend=` > data > `CPU()` chain,
-strict name resolution, no global state) are described on the
+The backend resolution rules (the explicit `backend=` keyword, default
+`CPU()`, strict name resolution, no global state) are described on the
 [manual](manual.md) page; `backend_from_name` is the strict name resolver the
 `backend=` keyword uses.
 

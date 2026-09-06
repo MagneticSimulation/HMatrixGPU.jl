@@ -32,7 +32,7 @@ instead of a software `pow`.
 ## Measured numbers
 
 Measured with the default `N` on a fresh Julia session (times include one-time
-JIT compilation), 2× NVIDIA A100, Julia 1.12. Source: `examples/README.md`.
+JIT compilation), an NVIDIA A100, Julia 1.12. Source: `examples/README.md`.
 `relerr` is the relative error of the compressed matvec against the exact
 kernel; the CUDA columns come from the closing GPU section of each script.
 
@@ -78,21 +78,21 @@ the same script is a CPU smoke test and a GPU benchmark.
 
 ## Micromagnetics: the demagnetization field
 
-A typical application is the demagnetization field in finite-element
-micromagnetic simulations
-([MicroMagnetic.jl](https://github.com/MagneticSimulation/MicroMagnetic.jl)).
-Two integration paths exist; both reduce to a single dense matrix–vector
-product per time step, which is exactly what the 𝓗-matrix accelerates. The
-direct path discretizes the demag tensor `N(rᵢ, rⱼ)` (3 DOFs per cell,
-`dims = 3`, grouped `3×3` pivoting for the anisotropic components) —
+A typical application is the demagnetization field in micromagnetic
+simulations
+([MicroMagnetic.jl](https://github.com/MagneticSimulation/MicroMagnetic.jl)):
+each time step is one dense matrix–vector product, which is what the
+𝓗-matrix accelerates. The tensor assembled in
 [`vector_demag.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/vector_demag.jl)
-is the runnable form, and
+and
 [`hmatrix_vector.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/hmatrix_vector.jl)
-shows the device-side evaluation of the same tensor at scale. In the hybrid
-FEM–BEM (Fredkin–Koehler) scheme the compression target is the dense
-boundary-element matrix `B` on the mesh boundary — the only O(N²) operation
-of the time step; since `B` is symmetric, the forward product suffices
-(no transpose/adjoint needed). MicroMagnetic.jl wires this in as its
-`bem_hmatrix` demag method. Build the matrices once per mesh, reuse them for
-every time step, and verify the compressed product against the dense
-reference on the target geometry before production runs.
+is the point-dipole tensor with the self term zeroed — a teaching demo
+(`dims = 3`, grouped `3×3` pivoting). Production kernels follow the
+discretization: finite-difference codes evaluate the Newell analytic
+cell-pair integrals (regularizing the self term and the near field), and FEM
+codes use the hybrid FEM–BEM (Fredkin–Koehler) scheme whose compressed
+operator is the dense boundary matrix `B` on the mesh boundary (symmetric —
+the forward product suffices); MicroMagnetic.jl wires this in as its
+`bem_hmatrix` demag method. Either way the change is confined to the kernel
+(or the batched `getindex` of a low-level `K`) — the 𝓗-matrix compression
+interface is unchanged. Build once per mesh, reuse for every time step.
