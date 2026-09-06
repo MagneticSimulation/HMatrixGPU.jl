@@ -1,0 +1,91 @@
+# Examples
+
+The repository ships five runnable, self-validating example scripts
+([examples/](https://github.com/MagneticSimulation/HMatrixGPU.jl/tree/main/examples) —
+scenario, kernel, mode and measured numbers below are synced from
+`examples/README.md`). Every script validates the compressed matvec against
+the exact kernel (`relerr < 1e-5`, non-zero exit on failure), takes the
+problem size as its first command-line argument, and prints a common
+measurement format (assembly time, block counts, ACA rank range, compression
+ratio, matvec time, relative error).
+
+## The gallery
+
+| Script | Scenario | Kernel | Mode | Key parameters | Default N |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| [`scalar_laplace2d.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/scalar_laplace2d.jl) | 2D Laplace single-layer BEM on a ring | `-log(r)/(2π)` | high-level | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
+| [`scalar_laplace3d.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/scalar_laplace3d.jl) | 3D Laplace single-layer BEM on a Fibonacci sphere | `1/(4πr)` | explicit low-level | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
+| [`covariance_gaussian.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/covariance_gaussian.jl) | Gaussian covariance, GP/kriging in the unit cube | `σ²·exp(-r²/(2ℓ²))`, σ=1, ℓ=0.1 | high-level | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
+| [`vector_demag.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/vector_demag.jl) | dipolar demag tensor, thin-film slab, host-loop kernel | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | high-level, `dims=3` | `eta=1.5, eps=1e-4, dims=3` (ACA block sizes follow `dims`) | 2000 (6000×6000) |
+| [`hmatrix_vector.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/hmatrix_vector.jl) | same tensor, **device-side kernel evaluation** (advanced) | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | explicit low-level, device block evaluation | `eta=1.0, eps=1e-6, dims=3, blocks 3×3` | 2000 (6000×6000) |
+
+The three "high-level" scripts are the do-block form of the
+[manual](manual.md); `scalar_laplace3d.jl` shows the same workflow in the
+explicit low-level mode (custom struct + batched `getindex`), and
+`hmatrix_vector.jl` moves the block *evaluation* itself onto the device with
+a KernelAbstractions kernel.
+
+## Measured numbers
+
+Measured with the default `N` on a fresh Julia session (times include one-time
+JIT compilation), 2× NVIDIA A100, Julia 1.12. Source: `examples/README.md`.
+`relerr` is the relative error of the compressed matvec against the exact
+kernel; the CUDA columns come from the closing GPU section of each script.
+
+| Script | assembly | compression | rank | matvec | relerr | assembly (CUDA) | matvec (CUDA) | relerr (CUDA) |
+| :-- | --: | --: | :-- | --: | --: | --: | --: | --: |
+| `scalar_laplace2d.jl` | 5.9 s | 15.8× | 4–5 | 1.24 ms | 2.8e-08 | 3.4 s | 0.06 ms | 2.8e-08 |
+| `scalar_laplace3d.jl` | 7.5 s | 2.4× | 9–14 | 11.02 ms | 2.5e-09 | 4.8 s | 0.12 ms | 2.5e-09 |
+| `covariance_gaussian.jl` | 13.5 s | 1.3× | 10–34 | 22.00 ms | 5.5e-12 | 8.7 s | 0.17 ms | 5.5e-12 |
+| `vector_demag.jl` | 9.8 s | 2.7× | 17–27 | 22.61 ms | 1.7e-10 | 5.9 s | 0.16 ms | 1.7e-10 |
+| `hmatrix_vector.jl` (CPU path) | 18.2 s | 1.4× | 46–100 | 58.4 ms | 1.6e-10 | — | — | — |
+| `hmatrix_vector.jl` (CUDA) | — | — | — | — | — | 18.8 s | 0.26 ms | 1.6e-10 |
+
+Lazy kernels assemble through the CPU ACA in all examples (the queried blocks
+are evaluated by the kernel, then the factors are placed on the requested
+backend); only the matvec is device-side — except in `hmatrix_vector.jl`,
+where the block evaluation itself already runs on the device. Notes: the 2D
+log kernel on a ring is the smoothest case (rank 4–5, 15.8× compression); the
+covariance example at these parameters is dominated by its near-field blocks
+in 3D, so its compression is modest — the win is the O(N log N) matvec and
+O(N) storage instead of the O(N²) dense product; the vector demag kernel
+decays slowly and is anisotropic, so it compresses far less than smooth
+scalar kernels even with grouped (3×3) pivoting.
+
+## How to run
+
+```sh
+julia --project=. examples/scalar_laplace2d.jl        # default N
+julia --project=. examples/scalar_laplace3d.jl 2000   # custom N
+```
+
+**CPU:** every script runs entirely on the CPU out of the box.
+
+**GPU:** the GPU packages are not installed by HMatrixGPU.jl — run the scripts
+in an environment that also has the vendor package for your hardware (`CUDA`,
+`AMDGPU`, `oneAPI` or `Metal`) with a functional device. Each script's closing
+GPU section resolves a GPU backend explicitly (`HMatrixGPU.@using_gpu()` to
+load whatever the environment provides, then `HMatrixGPU.backend_from_name`)
+and is skipped cleanly — with a printed notice — when none is available, so
+the same script is a CPU smoke test and a GPU benchmark.
+
+## Micromagnetics: the demagnetization field
+
+A typical application is the demagnetization field in finite-element
+micromagnetic simulations
+([MicroMagnetic.jl](https://github.com/MagneticSimulation/MicroMagnetic.jl)).
+Two integration paths exist; both reduce to a single dense matrix–vector
+product per time step, which is exactly what the 𝓗-matrix accelerates. The
+direct path discretizes the demag tensor `N(rᵢ, rⱼ)` (3 DOFs per cell,
+`dims = 3`, grouped `3×3` pivoting for the anisotropic components) —
+[`vector_demag.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/vector_demag.jl)
+is the runnable form, and
+[`hmatrix_vector.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/hmatrix_vector.jl)
+shows the device-side evaluation of the same tensor at scale. In the hybrid
+FEM–BEM (Fredkin–Koehler) scheme the compression target is the dense
+boundary-element matrix `B` on the mesh boundary — the only O(N²) operation
+of the time step; since `B` is symmetric, the forward product suffices
+(no transpose/adjoint needed). MicroMagnetic.jl wires this in as its
+`bem_hmatrix` demag method. Build the matrices once per mesh, reuse them for
+every time step, and verify the compressed product against the dense
+reference on the target geometry before production runs.
