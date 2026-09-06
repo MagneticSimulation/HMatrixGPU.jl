@@ -12,9 +12,7 @@ so the same code runs on NVIDIA, AMD, Intel and Apple GPUs as well as the CPU.
 
 Typical applications include boundary-element matrices, covariance and
 spatial-statistics kernels, and the demagnetization tensors of micromagnetic
-simulations — for example the fast dense matrix–vector product of the
-finite-element demagnetization field in
-[MicroMagnetic.jl](https://github.com/MagneticSimulation/MicroMagnetic.jl).
+simulations.
 
 ## Features
 
