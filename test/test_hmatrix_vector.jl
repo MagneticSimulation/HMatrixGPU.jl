@@ -54,3 +54,26 @@ function test_hmatrix_vector_matvec()
 end
 
 test_functions("HMatrix vector", test_hmatrix_vector_matvec)
+
+# ---------------------------------------------------------------------------
+# default ACA block sizes follow the trees' dims: for dims=3 trees the default
+# construction must take the same (3,3) grouped-pivoting path as the explicit
+# row_block_size=3, col_block_size=3 one — the ACA rng is seeded with
+# hash((n_rows, n_cols, row_block, col_block)), so both assemblies are
+# identical (CPU path; a dense mixed-component log kernel keeps real ACA work)
+# ---------------------------------------------------------------------------
+M3 = 500
+pts3m = reduce(hcat, [[sin(i * 2π / M3), cos(i * 2π / M3), 0.0] for i in 1:M3])
+Klog = [-0.5 / π * log(max(norm(pts3m[:, i] .- pts3m[:, j]), 1e-12))
+        for i in 1:M3, j in 1:M3]
+K3 = kron([1.0 0.4 0.2; 0.4 1.0 0.4; 0.2 0.4 1.0], Klog)
+ct3 = ClusterTree(pts3m; max_points_per_leaf=64, dims=3)
+cs3 = ClusterTree(pts3m; max_points_per_leaf=64, dims=3)
+
+Hd = HMatrix(K3, ct3, cs3; eta=1.5, eps=1e-6)
+He = HMatrix(K3, ct3, cs3; eta=1.5, eps=1e-6, row_block_size=3, col_block_size=3)
+@test Hd.ranks == He.ranks
+@test Hd.napprox > 0                      # real ACA work, not all-dense fallback
+x3 = rand(3 * M3)
+@test Hd * x3 == He * x3                  # bitwise: identical assembly
+@test norm(K3 * x3 - Hd * x3) / norm(K3 * x3) < 1e-4

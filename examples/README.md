@@ -24,8 +24,8 @@ Every script follows the same contract:
 | [`scalar_laplace2d.jl`](scalar_laplace2d.jl) | 2D Laplace single-layer BEM on a ring | `-log(r)/(2π)` | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
 | [`scalar_laplace3d.jl`](scalar_laplace3d.jl) | 3D Laplace single-layer BEM on a Fibonacci sphere | `1/(4πr)` | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
 | [`covariance_gaussian.jl`](covariance_gaussian.jl) | Gaussian covariance, GP/kriging in the unit cube | `σ²·exp(-r²/(2ℓ²))`, σ=1, ℓ=0.1 | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
-| [`vector_demag.jl`](vector_demag.jl) | dipolar demag tensor, thin-film slab, host-loop kernel | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.5, eps=1e-4, dims=3, blocks 3×3` | 2000 (6000×6000) |
-| [`hmatrix_vector.jl`](hmatrix_vector.jl) | same tensor, **device-side kernel evaluation** (advanced) | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.0, eps=1e-6, dims=3, blocks 3×3` | 2000 (6000×6000) |
+| [`vector_demag.jl`](vector_demag.jl) | dipolar demag tensor, thin-film slab, host-loop kernel | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.5, eps=1e-4, dims=3` (block sizes default to the trees' dims: 3×3) | 2000 (6000×6000) |
+| [`hmatrix_vector.jl`](hmatrix_vector.jl) | same tensor, **device-side kernel evaluation** (advanced) | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.0, eps=1e-6, dims=3` (block sizes default to the trees' dims: 3×3) | 2000 (6000×6000) |
 
 ## Measured numbers
 
@@ -86,9 +86,10 @@ do the backend dispatch, and `Array(y)` is the only synchronization.
   No `dims`/block-size settings are needed — the defaults handle it.
 - **Vector problem, d DOF per point** (magnetization, elasticity): use
   `vector_demag.jl`. Build the cluster trees with `dims=3` (tree nodes then
-  cover whole cells) and pass `row_block_size = col_block_size = dims` so the
-  ACA pivots one cell at a time — scalar per-column pivoting starves the weak
-  components of anisotropic kernels.
+  cover whole cells) — the ACA block sizes default to the trees' `dims`, so
+  the ACA pivots one cell at a time, which scalar per-column pivoting
+  (starving the weak components of anisotropic kernels) would not; explicit
+  `row_block_size`/`col_block_size` override the default.
 - **Matrix-free vs. dense kernels:** all examples here are matrix-free (lazy
   `K`), which is the fully supported assembly path today — CPU ACA per block,
   factors on any backend. A dense `K::Matrix` with a CUDA backend has a

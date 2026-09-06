@@ -90,12 +90,11 @@ Xc = ClusterTree(pts; max_points_per_leaf=64, dims=dims)
 Yc = ClusterTree(pts; max_points_per_leaf=64, dims=dims)
 
 # ---- build (matrix-free K always assembles through the CPU ACA path) --------
-# row_block_size = col_block_size = 3: the ACA pivots one cell (3 components)
-# at a time. This grouped pivoting matters for anisotropic vector kernels —
-# in a thin film the in-plane components dominate the tensor, and scalar
-# per-column pivoting would starve the weak out-of-plane components.
-t_asm = @elapsed H = HMatrix(K, Xc, Yc; eta=eta, eps=eps,
-                             row_block_size=dims, col_block_size=dims)
+# The ACA block sizes default to the trees' dims, so the pivots are one cell
+# (3 components) at a time. This grouped pivoting matters for anisotropic
+# vector kernels — in a thin film the in-plane components dominate the tensor,
+# and scalar per-column pivoting would starve the weak out-of-plane components.
+t_asm = @elapsed H = HMatrix(K, Xc, Yc; eta=eta, eps=eps)
 st = info(H)
 
 # ---- validate against the dense reference ------------------------------------
@@ -122,9 +121,7 @@ relerr < 1e-5 || error("validation failed: relerr=$relerr")
 # tolerance, so the accuracy is identical on both backends.
 HMatrixGPU.@using_gpu()             # loads whichever GPU package is installed
 if set_backend("cuda")              # returns false (clean skip) without a GPU
-    t_asm_g = @elapsed Hg = HMatrix(K, Xc, Yc; eta=eta, eps=eps,
-                                    row_block_size=dims, col_block_size=dims,
-                                    backend="cuda")
+    t_asm_g = @elapsed Hg = HMatrix(K, Xc, Yc; eta=eta, eps=eps, backend="cuda")
     xg = HMatrixGPU.create_zeros(Float64, size(K, 2)); copyto!(xg, x)
     yg = Array(Hg * xg)             # Array() also synchronizes
     t_mv_g = best_of(() -> Array(Hg * xg), 20)

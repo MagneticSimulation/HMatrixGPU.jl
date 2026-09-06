@@ -17,15 +17,41 @@ end
 mutable struct ClusterTree
     index_map::Vector{Int}    # Ordered indices of points in the cluster tree
     root::ClusterNode         # Root node of the cluster tree
+    dims::Int                 # DOFs per point (index_map counts dims-expanded DOFs)
+    coordinates::AbstractMatrix{Float64}  # normalized d x N host coordinates (columns = points)
+end
+
+# normalize a point-set input to the internal d x N matrix (columns =
+# points): matrices pass through untouched (by reference); a vector of
+# d-element tuples/vectors is stacked once (each element becomes one
+# column). No numeric preprocessing: coordinate values are used as given.
+function _point_matrix(pts)
+    M = pts isa AbstractMatrix ? pts : stack(pts)
+    if size(M, 2) <= 3 && size(M, 1) >= 10 * size(M, 2)
+        @warn "point coordinates should be d x N (one point per column); got " *
+              "$(size(M,1)) x $(size(M,2)) — possible transposed input" maxlog = 1
+    end
+    return M
 end
 
 """
     ClusterTree(coordinates; max_points_per_leaf::Int=32, dims::Int=1) -> ClusterTree
 
-Builds a hierarchical cluster tree from a set of points represented by `coordinates`.
+Builds a hierarchical cluster tree from a set of points.
+
+`coordinates` accepts two forms (normalized once, no numeric preprocessing —
+coordinate values are used as given):
+
+- a `d x N` matrix with one point per column (stored by reference), or
+- a vector of points, each a `d`-element tuple or vector (stacked once into a
+  `d x N` matrix).
+
+Device-resident coordinates are downloaded to the host once — tree
+construction is a host-side geometric algorithm. An input with many more rows
+than columns warns about a possible transposed (`N x d`) layout.
 
 # Arguments
-- `coordinates::Matrix{Float64}`: A 2D matrix where each column represents a point in space.
+- `coordinates`: the point set, in either of the two forms above.
 - `max_points_per_leaf::Int=32`: The maximum number of points per leaf node. If a node has more points than this threshold, 
   it will be split along its longest axis to form child nodes. Defaults to 32.
 - `dims::Int=1`: The dimensionality factor applied to the point indices in `index_map`. When greater than 1, `index_map` will
@@ -35,11 +61,13 @@ Builds a hierarchical cluster tree from a set of points represented by `coordina
 A `ClusterTree` struct containing:
   - `index_map`: A reordered vector of point indices that reflects the cluster structure.
   - `root_node`: The root `ClusterNode` representing the entire hierarchical cluster tree.
+  - `dims`: The DOFs-per-point factor (the default ACA block sizes follow it).
+  - `coordinates`: The normalized `d x N` host coordinates (one point per column).
 
 # Example
 ```julia
 coordinates = rand(3, 100)  # 100 points in 3D space
-tree = build_cluster_tree(coordinates, max_points_per_leaf=5, dims=3)
+tree = ClusterTree(coordinates; max_points_per_leaf=5, dims=3)
 ```
 """
 function ClusterTree(coordinates; max_points_per_leaf::Int=32, dims::Int=1)
@@ -47,13 +75,20 @@ function ClusterTree(coordinates; max_points_per_leaf::Int=32, dims::Int=1)
         error("Parameter `dims` must be a positive integer.")
     end
 
+    # normalize the point set (matrix by reference / vector stacked once);
+    # device input is downloaded once — the tree is built on the host
+    coords = _point_matrix(coordinates)
+    eltype(coords) === Float64 || (coords = Float64.(coords))
+    KernelAbstractions.get_backend(coords) isa KernelAbstractions.CPU ||
+        (coords = Array(coords))
+
     # Initialize index map with point indices
-    point_indices = collect(1:size(coordinates, 2))
+    point_indices = collect(1:size(coords, 2))
 
     # Build the tree recursively starting from the root node
-    root_node = build_tree_node(coordinates, max_points_per_leaf, point_indices, 1,
-                                size(coordinates, 2) + 1)
-    tree = ClusterTree(point_indices, root_node)
+    root_node = build_tree_node(coords, max_points_per_leaf, point_indices, 1,
+                                size(coords, 2) + 1)
+    tree = ClusterTree(point_indices, root_node, dims, coords)
 
     # If dims > 1, expand index_map and adjust tree node indices
     if dims > 1
@@ -66,8 +101,9 @@ function ClusterTree(coordinates; max_points_per_leaf::Int=32, dims::Int=1)
     return tree
 end
 
-# Recursive function to build nodes within the tree
-function build_tree_node(coordinates::Matrix{Float64}, max_points_per_leaf::Int,
+# Recursive function to build nodes within the tree (any Float64 AbstractMatrix
+# is accepted: matrix inputs are stored by the tree by reference)
+function build_tree_node(coordinates::AbstractMatrix{Float64}, max_points_per_leaf::Int,
                          index_map::Vector{Int}, start_idx::Int, end_idx::Int)
 
     # Return if this is a leaf node (checked before anything else: an empty

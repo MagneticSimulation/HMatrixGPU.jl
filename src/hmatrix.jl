@@ -93,16 +93,21 @@ trees `X` and `Y`.
 - The device is fixed at construction: `like=` takes precedence over
   `backend=`, which takes precedence over the global `set_backend`; the
   global backend only affects constructions made after it is set.
+- `row_block_size`/`col_block_size` default to `nothing`, which follows the
+  trees' `dims` (`X.dims`/`Y.dims`): vector problems with `dims=3` pivot one
+  whole cell (3 components) per group, which prevents the anisotropy of vector
+  kernels from starving the weak components. Explicit values override the
+  default.
 - `mul!`/`*` require `x` (and `result`) to live on the same backend as the
   matrix; cross-device inputs error out instead of being moved.
-- A dense `K` with a CUDA backend assembles on the GPU fast path, which
+- A dense `K` on a GPU backend assembles on the GPU fast path, which
   ignores `svd_recompress`/`row_block_size`/`col_block_size` (the randomized
   SVD truncates optimally without grouped pivoting).
 - Complex-valued kernels are not supported (the constructor errors).
 """
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
                  index_map_using_cpu=true, svd_recompress=true,
-                 row_block_size=1, col_block_size=1,
+                 row_block_size=nothing, col_block_size=nothing,
                  backend=nothing, like=nothing)
     eltype(K) <: Complex &&
         error("HMatrix does not support complex-valued kernels (eltype(K) = $(eltype(K)))")
@@ -139,7 +144,11 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                                      ranks; T=eltype(K))
     end
 
-    # CPU path: grouped ACA+ per block (threaded), then CSR packing
+    # CPU path: grouped ACA+ per block (threaded), then CSR packing. The block
+    # sizes default to the trees' dims: cluster ranges of a dims-expanded tree
+    # are multiples of dims, so the grouped pivoting stays divisibility-safe.
+    rb = something(row_block_size, X.dims)
+    cb = something(col_block_size, Y.dims)
     dense_matrices, U_matrices, V_matrices, dense_block_indices, approx_block_indices = build_matrices(K,
                                                                                                        block_tree.target_index_map,
                                                                                                        block_tree.source_index_map,
@@ -147,8 +156,8 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                                                                                                        approx_blocks;
                                                                                                        eps=eps,
                                                                                                        svd_recompress=svd_recompress,
-                                                                                                       row_block=row_block_size,
-                                                                                                       col_block=col_block_size)
+                                                                                                       row_block=rb,
+                                                                                                       col_block=cb)
 
     return build_csr_hmatrix(eltype(K), size(K, 1), size(K, 2),
                              target_map, source_map,

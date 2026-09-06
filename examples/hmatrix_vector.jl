@@ -128,10 +128,9 @@ println("  kernel coordinates live on: ", typeof(K.Xd))
 Xc = ClusterTree(pts; max_points_per_leaf=64, dims=dims)
 Yc = ClusterTree(pts; max_points_per_leaf=64, dims=dims)
 
-# ---- build (lazy K always assembles through the CPU ACA; the factors land on
-#      the active backend, so the matvec below runs on the GPU when active) ----
-t_asm = @elapsed H = HMatrix(K, Xc, Yc; eta=eta, eps=eps,
-                             row_block_size=dims, col_block_size=dims)
+# ---- build (lazy K always assembles through the CPU ACA; the block sizes
+#      default to the trees' dims — one cell per pivot group) ------------------
+t_asm = @elapsed H = HMatrix(K, Xc, Yc; eta=eta, eps=eps)
 st = info(H)
 
 # ---- validate against the dense reference ------------------------------------
