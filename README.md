@@ -34,9 +34,9 @@ finite-element demagnetization field in
 - **Multi-backend** via KernelAbstractions: CPU, CUDA, AMDGPU, oneAPI and Metal.
   The package itself has zero GPU dependencies — the vendor package is the
   user's choice and is simply loaded with `using` (loading it has zero side
-  effects on HMatrixGPU). Where an `HMatrix` lands is decided per instance
-  (`backend=` or `like=` keyword, else the device of the data), and with no
-  global backend state, CPU and GPU instances — even from different vendors —
+  effects on HMatrixGPU). Where an `HMatrix` lands is decided per instance by
+  the explicit `backend=` keyword (default `CPU()`), and with no global
+  backend state, CPU and GPU instances — even from different vendors —
   coexist in one process and interleave freely.
 
 Runnable application examples (scalar BEM, covariance, vector demagnetization
@@ -123,11 +123,13 @@ provided in [`examples/hmatrix_vector.jl`](examples/hmatrix_vector.jl).
 
 ## Backend options
 
-The landing backend of an `HMatrix` is resolved per construction:
-`like=` > `backend=` > the device of the primary data (`K`, or the point set
-for the high-level constructors) > `CPU()`. There is no global backend state
-and no auto-detection — the user chooses the backend, the package implements
-the functionality.
+The landing backend of an `HMatrix` is decided per construction by the
+`backend=` keyword — a name or a KernelAbstractions backend object; the
+default is `CPU()`. Device-resident inputs (`K` or point sets on a GPU) are
+legal: they are downloaded once during construction but do not decide the
+placement, and a cross-device matvec errors out as the safety net. There is
+no global backend state and no auto-detection — the user chooses the backend,
+the package implements the functionality.
 
 | `backend=` name     | Hardware  | KernelAbstractions backend |
 | :------------------ | :-------- | :------------------------- |
@@ -138,10 +140,11 @@ the functionality.
 | `"metal"` / `"apple"` | Apple GPU | `Metal.MetalBackend()`   |
 
 `backend=` also accepts a KernelAbstractions backend object directly, and
-`like=<array>` places the factors next to `like`. Requesting a GPU backend
-whose vendor package is not loaded errors with "run `using CUDA` first"; a
-loaded package without a functional device errors as well. For a soft fallback
-in scripts, wrap the request in `try`/`catch` — see the examples.
+`backend = KernelAbstractions.get_backend(x)` places the factors next to `x`
+. Requesting a
+GPU backend whose vendor package is not loaded errors with "run `using CUDA`
+first"; a loaded package without a functional device errors as well. For a
+soft fallback in scripts, wrap the request in `try`/`catch` — see the examples.
 
 ## Documentation
 

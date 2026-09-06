@@ -60,30 +60,11 @@ Base.size(h::HMatrix) = (h.m, h.n)
 # matrix-free kernels) the CPU ACA path is used.
 gpu_dense_assembly_available(B::KernelAbstractions.Backend) = device_svd_available(B)
 
-# landing backend: like= > backend= > device of the primary data > CPU()
-# (no global default — the package keeps no backend state)
-function _resolve_landing(like, backend, datas...)
-    (like !== nothing && backend !== nothing) &&
-        error("specify either `like` or `backend`, not both")
-    like !== nothing && return KernelAbstractions.get_backend(like)
-    backend !== nothing && return (backend isa KernelAbstractions.Backend ?
-                                   backend : backend_from_name(backend))
-    seen = nothing
-    for a in datas
-        # a lazy/custom kernel struct carries no backend information and
-        # KernelAbstractions.get_backend errors for array types it does not
-        # know: treat such data as host data
-        Ba = try
-            KernelAbstractions.get_backend(a)
-        catch
-            KernelAbstractions.CPU()
-        end
-        Ba isa KernelAbstractions.CPU && continue
-        seen === nothing && (seen = Ba; continue)
-        Ba == seen || error("input data lives on different backends ($seen vs $Ba)")
-    end
-    return something(seen, KernelAbstractions.CPU())
-end
+# landing backend: decided solely by the explicit `backend=`, else CPU
+# (API_DESIGN v1.1 §4.4: no like=, no device inference — the placement is
+# always explicit; the matvec same-backend check is the safety net)
+_resolve_backend(backend) = backend === nothing ? KernelAbstractions.CPU() :
+    (backend isa KernelAbstractions.Backend ? backend : backend_from_name(backend))
 
 """
     HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
@@ -109,19 +90,19 @@ trees `X` and `Y`.
   `"oneapi"`, `"metal"`) or a KernelAbstractions backend object. Requesting a
   GPU backend whose vendor package is not loaded errors with
   "run `using CUDA` first"; a loaded package without a functional device
-  errors as well (no auto-detection, no silent fallback).
-- `like::Union{Nothing,AbstractArray}`: alternative to `backend` — move all
-  factor arrays to the backend where `like` lives (backend follows the data).
-- With neither keyword given, the factors follow the device of the primary
-  data `K` (a device-resident `K` keeps the matrix on its device); host data
-  defaults to the CPU.
+  errors as well (no auto-detection, no silent fallback). The placement is
+  explicit-only: `CPU()` when no keyword is given (the idiom
+  `backend = KernelAbstractions.get_backend(x)` replaces the removed `like=`
+  keyword). Device-resident inputs (a `CuArray` `K` or point set) are
+  downloaded once during construction and do *not* decide the placement.
 
 # Contracts
 - The device is fixed at construction and the package keeps no backend state:
-  the landing backend is resolved as `like=` > `backend=` > the device of the
-  primary data `K` > `CPU()`. Loading a vendor package (`using CUDA`) has zero
-  side effects — it neither switches a global backend nor affects later
-  constructions in any way.
+  the landing backend is `backend=` (name or Backend object), default `CPU()`.
+  Loading a vendor package (`using CUDA`) has zero side effects — it neither
+  switches a global backend nor affects later constructions in any way.
+  A cross-device matvec errors out — that hard check is the safety net for a
+  mis-requested placement.
 - Instances are independent, so CPU and GPU `HMatrix` instances (even from
   different vendors) can coexist in one process and their matvecs can be
   interleaved freely.
@@ -140,12 +121,12 @@ trees `X` and `Y`.
 function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps=1e-5,
                  index_map_using_cpu=true, svd_recompress=true,
                  row_block_size=nothing, col_block_size=nothing,
-                 backend=nothing, like=nothing)
+                 backend=nothing)
     eltype(K) <: Complex &&
         error("HMatrix does not support complex-valued kernels (eltype(K) = $(eltype(K)))")
 
-    # resolve the landing backend (like= > backend= > device of K > CPU())
-    B = _resolve_landing(like, backend, K)
+    # resolve the landing backend (`backend=`, default CPU())
+    B = _resolve_backend(backend)
 
     block_tree = BlockTree(X, Y; eta=eta, index_map_using_cpu=index_map_using_cpu,
                            backend=B)
@@ -211,23 +192,11 @@ function HMatrix(g::Function, pts; dims=1, max_points_per_leaf=32, kwargs...)
 end
 
 function HMatrix(g::Function, pts_t, pts_s; dims=1, max_points_per_leaf=32,
-                 backend=nothing, like=nothing, kwargs...)
-    Pt = _point_matrix(pts_t)
-    Ps = _point_matrix(pts_s)
-    # mixed target/source point sets are rejected when the landing backend
-    # would be decided from the data (API_DESIGN §4.4 (ii)); an explicit
-    # like=/backend= always wins and is checked by _resolve_landing below
-    if like === nothing && backend === nothing
-        Bt = KernelAbstractions.get_backend(Pt)
-        Bs = KernelAbstractions.get_backend(Ps)
-        Bt == Bs || error("target and source points live on different " *
-                          "backends ($Bt vs $Bs)")
-    end
-    B = _resolve_landing(like, backend, Pt, Ps)   # device follows the points
-    X = ClusterTree(Pt; max_points_per_leaf, dims)  # device input: downloaded once inside
-    Y = ClusterTree(Ps; max_points_per_leaf, dims)
+                 backend=nothing, kwargs...)
+    X = ClusterTree(pts_t; max_points_per_leaf, dims)  # device input: downloaded once inside
+    Y = ClusterTree(pts_s; max_points_per_leaf, dims)
     K = KernelMatrix(g, X.coordinates, Y.coordinates; dims)
-    return HMatrix(K, X, Y; backend=B, kwargs...)
+    return HMatrix(K, X, Y; backend=backend, kwargs...)
 end
 
 # custom trees: dims defaults to the trees' own dims
@@ -443,9 +412,9 @@ function build_csr_hmatrix(::Type{T}, m::Int, n::Int,
                            dense_block_indices::Vector{Tuple{Int,Int,Int,Int}},
                            U_matrices::Vector{<:Matrix}, V_matrices::Vector{<:Matrix},
                            approx_block_indices::Vector{Tuple{Int,Int,Int,Int}};
-                           backend=nothing, like=nothing) where {T}
-    # landing backend: like= > backend= > CPU() (no data arguments to consult)
-    B = _resolve_landing(like, backend)
+                           backend=nothing) where {T}
+    # landing backend: the explicit `backend=`, else CPU()
+    B = _resolve_backend(backend)
     move = function (a)
         KernelAbstractions.get_backend(a) == B && return a
         dest = KernelAbstractions.zeros(B, eltype(a), size(a))

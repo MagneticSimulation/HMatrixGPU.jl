@@ -6,8 +6,9 @@ using Test
 
 # ---------------------------------------------------------------------------
 # High-level API: KernelMatrix + function-kernel HMatrix constructors.
-# Nine test groups per TASK_highlevel_api.md §F4; every function takes the
-# platform backend B and is registered through test_functions (task-4 harness).
+# Eight test groups per TASK_highlevel_api.md §F4 (groups 6/7 merged into the
+# v1.1 device-input test); every function takes the platform backend B and is
+# registered through test_functions (task-4 harness).
 #
 # The reference kernels use explicit component arithmetic and are shared by
 # the high-level path and the hand-written low-level structs below, so both
@@ -151,29 +152,23 @@ function test_highlevel_dims_conflict(B)
 end
 
 # ---------------------------------------------------------------------------
-# 6. mixed-device point sets are rejected (CUDA platform only)
+# 6. device point sets (even mixed-device) build on any platform's backend:
+#    they are downloaded once for the host-side trees, but the placement is
+#    explicit-only — no keyword lands the factor arrays on the CPU (CUDA
+#    platform only; the CPU construction is covered by the other groups)
 # ---------------------------------------------------------------------------
-function test_highlevel_mixed_device(B)
+function test_highlevel_device_input(B)
     B isa KernelAbstractions.CPU && return
-    @test_throws ErrorException HMatrix(log_kernel, CuArray(pts_hl_mat), pts_hl_mat)
+    # device (even mixed) point sets still build — downloaded once for the
+    # host-side trees — but the placement is explicit-only: no keyword → CPU
+    H = HMatrix(log_kernel, CuArray(pts_hl_mat), pts_hl_mat; eta=1.5, eps=1e-6)
+    @test H.near_data isa Array
+    H2 = HMatrix(log_kernel, CuArray(pts_hl_mat); eta=1.5, eps=1e-6, backend=B)
+    @test H2.near_data isa CuArray
 end
 
 # ---------------------------------------------------------------------------
-# 7. device follows the point set: a device-resident input with no keyword
-#    lands the factor arrays on its backend (CUDA platform only)
-# ---------------------------------------------------------------------------
-function test_highlevel_device_follows(B)
-    B isa KernelAbstractions.CPU && return
-    H = HMatrix(log_kernel, CuArray(pts_hl_mat); eta=1.5, eps=1e-6)
-    @test H.near_data isa CuArray
-    x = rand(Nh)
-    ref = Matrix(KernelMatrix(log_kernel, pts_hl, pts_hl)) * x
-    y = Array(H * CuArray(x))
-    @test norm(ref - y) / norm(ref) < 1e-5
-end
-
-# ---------------------------------------------------------------------------
-# 8. do-block smoke test: the syntax sugar HMatrix(pts; ...) do x, y ... end
+# 7. do-block smoke test: the syntax sugar HMatrix(pts; ...) do x, y ... end
 #    must build, report and validate like the named-function form
 # ---------------------------------------------------------------------------
 function test_highlevel_do_block_smoke(B)
@@ -193,7 +188,7 @@ function test_highlevel_do_block_smoke(B)
 end
 
 # ---------------------------------------------------------------------------
-# 9. batch getindex semantics: the (Vector, Vector) block query must agree
+# 8. batch getindex semantics: the (Vector, Vector) block query must agree
 #    with the elementwise entries, including the dims=3 memoized path
 # ---------------------------------------------------------------------------
 function test_highlevel_batch_getindex(B)
@@ -217,9 +212,7 @@ test_functions("high-level vector dims=3", test_highlevel_vector_dims3)
 test_functions("high-level dual form", test_highlevel_dual_form)
 test_functions("high-level kernel probe errors", test_highlevel_probe_errors)
 test_functions("high-level tree dims conflict", test_highlevel_dims_conflict)
-test_functions("high-level mixed device", test_highlevel_mixed_device;
-               platforms=["CUDA"])
-test_functions("high-level device follows points", test_highlevel_device_follows;
+test_functions("high-level device input", test_highlevel_device_input;
                platforms=["CUDA"])
 test_functions("high-level do-block smoke", test_highlevel_do_block_smoke)
 test_functions("high-level batch getindex", test_highlevel_batch_getindex)

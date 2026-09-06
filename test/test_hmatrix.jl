@@ -51,20 +51,18 @@ function test_hmatrix_matvec(B)
     @test norm(K * x - Array(y)) / norm(K * x) < 1e-4
 end
 
-# backend follows the data: build with `like` on the platform's backend — the
-# factor arrays must land next to `like`
-function test_backend_following_data(B)
+# the explicit idiom that replaces the removed like= keyword: place the matrix
+# next to a reference array via backend = KernelAbstractions.get_backend(...)
+function test_backend_from_data_idiom(B)
     like = HMatrixGPU.create_zeros(B, Float32, 0)
-    h_like = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, like=like)
-    @test nameof(typeof(h_like.near_data)) == nameof(typeof(like))
-    @test nameof(typeof(h_like.source_index_map)) == nameof(typeof(like))
-
+    h = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6,
+                backend=KernelAbstractions.get_backend(like))
+    @test nameof(typeof(h.near_data)) == nameof(typeof(like))
     x = rand(N)
-    y = h_like * HMatrixGPU.to_backend(like, x)
-    @test isapprox(K * x, Array(y); rtol=1e-4)
+    @test isapprox(K * x, Array(h * HMatrixGPU.to_backend(like, x)); rtol=1e-4)
 end
 
-test_functions("HMatrix", test_hmatrix_matvec, test_backend_following_data)
+test_functions("HMatrix", test_hmatrix_matvec, test_backend_from_data_idiom)
 
 function test_float32_end_to_end(B)
     K32 = Float32.(K)
@@ -99,28 +97,20 @@ function test_backend_keyword(B)
     # "gpu" is deliberately not a backend name (no auto-detection)
     @test_throws ErrorException HMatrixGPU.backend_from_name("gpu")
 
-    # like= alone lands next to `like` (host here, even on a GPU machine) ...
-    like_host = zeros(Float32, 0)
-    h_like_cpu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, like=like_host)
-    @test h_like_cpu.near_data isa Array
-    # ... and like= + backend= together are rejected
-    @test_throws ErrorException HMatrix(K, cluster, cluster;
-                                        like=like_host, backend="cuda")
-
     if CUDA.functional()
         h_cu = HMatrix(K, cluster, cluster; eta=1.5, eps=1e-6, backend="cuda")
         @test h_cu.near_data isa CuArray
         x_cu = CuArray(x)
         @test isapprox(h_cpu * x, Array(h_cu * x_cu); rtol=1e-4)
 
-        # data follows: a device-resident dense K makes the factors land on
-        # its backend without any keyword (the primary data is K)
+        # v1.1: device data no longer decides the placement — a CuArray K
+        # without keywords lands on the CPU (per-block queries download)
         pts_small = reduce(hcat, [[sin(i * 2π / 40), cos(i * 2π / 40), 0.0]
                                   for i in 1:40])
         cl_small = ClusterTree(pts_small; max_points_per_leaf=16)
         K_cu = CuArray(randn(40, 40))
         h_df = HMatrix(K_cu, cl_small, cl_small; eta=1.5, eps=1e-6)
-        @test h_df.near_data isa CuArray
+        @test h_df.near_data isa Array
     end
 end
 test_functions("backend keyword", test_backend_keyword)
