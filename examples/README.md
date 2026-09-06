@@ -53,7 +53,7 @@ the GPU-device path.
 | `scalar_laplace3d.jl` | 7.5 s | 2.4× | 9–14 | 10.82 ms | 2.5e-09 | 6.1 s | 0.12 ms | 2.5e-09 |
 | `covariance_gaussian.jl` | 15.7 s | 1.3× | 10–34 | 21.57 ms | 5.5e-12 | 12.3 s | 0.17 ms | 5.5e-12 |
 | `vector_demag.jl` | 12.6 s | 2.7× | 17–27 | 22.10 ms | 1.7e-10 | 10.8 s | 0.16 ms | 1.7e-10 |
-| `hmatrix_vector.jl` (CPU path) | 18.2 s | 1.4× | 46–100 | 58.4 ms | 1.6e-10 | — | — | — |
+| `hmatrix_vector.jl` (CPU path) | 14.7 s | 1.4× | 46–100 | 58.4 ms | 1.6e-10 | — | — | — |
 | `hmatrix_vector.jl` (CUDA) | — | — | — | — | — | 20.5 s | 0.28 ms | 1.6e-10 |
 
 The three high-level scripts and the explicit `scalar_laplace3d.jl` share the

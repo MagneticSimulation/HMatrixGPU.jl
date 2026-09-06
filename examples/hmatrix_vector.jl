@@ -55,31 +55,25 @@ dims = 3           # DOF per point (magnetization components)
 pts = rand(MersenneTwister(10), 3, N)
 
 # ---- device-side block evaluation -------------------------------------------
-# One thread per matrix element: the query index sets are arbitrary (the ACA
-# issues single-row group queries of length 3 and (view, view) dense blocks),
-# so per-element mapping is correct for *any* query shape — a kernel that
-# assumed the index length is divisible by 3 would silently return zero rows
-# for a 1-row query. The few extra sqrt calls per thread are irrelevant at
-# example sizes.
-@kernel function eval_dipolar_block!(out, @Const(X), @Const(Y), @Const(idx),
-                                     @Const(idy), @Const(nrows), @Const(ncols))
-    ii, jj = @index(Global, NTuple)
-    @inbounds if ii <= nrows && jj <= ncols     # padding guard (launches round
-        a, b = idx[ii], idy[jj]                 # ndrange up to the group size)
-        ia, ca = div(a - 1, 3) + 1, mod(a - 1, 3)   # cell index / component
-        jb, cb = div(b - 1, 3) + 1, mod(b - 1, 3)
-        rx = X[1, ia] - Y[1, jb]
-        ry = X[2, ia] - Y[2, jb]
-        rz = X[3, ia] - Y[3, jb]
+# queries from dims=3 trees arrive as whole cells: three consecutive DOFs per
+# cell, components in order — one work item per cell pair evaluates the
+# geometry once and writes the 3x3 block (the host asserts the invariant)
+@kernel function eval_dipolar_cells!(out, @Const(X), @Const(Y), @Const(idx),
+                                     @Const(idy), @Const(nci), @Const(ncj))
+    ci, cj = @index(Global, NTuple)          # cell positions within the query
+    @inbounds if ci <= nci && cj <= ncj      # padding guard
+        ia = div(idx[3 * ci - 2] - 1, 3) + 1  # ONE div per cell (first DOF)
+        jb = div(idy[3 * cj - 2] - 1, 3) + 1
+        rx = X[1, ia] - Y[1, jb]; ry = X[2, ia] - Y[2, jb]; rz = X[3, ia] - Y[3, jb]
         r2 = rx * rx + ry * ry + rz * rz
-        val = 0.0
-        if r2 >= 1e-24                          # self term: zeroed (Newell's
-            Rca = ca == 0 ? rx : (ca == 1 ? ry : rz)   # analytic cell integral
-            Rcb = cb == 0 ? rx : (cb == 1 ? ry : rz)   # regularizes it in real
-            delta = ca == cb ? 1.0 : 0.0               # micromagnetics)
-            val = -(3.0 * Rca * Rcb - r2 * delta) / (4π * r2^2.5)
+        denom = 4π * r2^2.5                   # ONE pow per cell pair
+        for cb in 1:3, ca in 1:3              # position within the triple IS
+            Rca = ca == 1 ? rx : (ca == 2 ? ry : rz)   # the component (1,2,3
+            Rcb = cb == 1 ? rx : (cb == 2 ? ry : rz)   # in order) — no mod
+            delta = ca == cb ? 1.0 : 0.0
+            val = r2 >= 1e-24 ? -(3.0 * Rca * Rcb - r2 * delta) / denom : 0.0
+            out[3 * ci - 3 + ca, 3 * cj - 3 + cb] = val
         end
-        out[ii, jj] = val
     end
 end
 
@@ -121,9 +115,12 @@ function Base.getindex(K::DipolarDemagGPU, I::AbstractVector{Int}, J::AbstractVe
     out = HMatrixGPU.create_zeros(bk, Float64, length(I), length(J))
     Id = HMatrixGPU.to_backend(out, collect(I))
     Jd = HMatrixGPU.to_backend(out, collect(J))
-    kernel! = eval_dipolar_block!(bk, 256)
-    kernel!(out, K.Xd, K.Yd, Id, Jd, length(I), length(J);
-            ndrange=(length(I), length(J)))
+    length(I) % 3 == 0 && length(J) % 3 == 0 ||
+        error("whole-cell queries expected (dims=3 trees, block sizes 3); " *
+              "got $(length(I)) x $(length(J))")
+    nci, ncj = length(I) ÷ 3, length(J) ÷ 3
+    kernel! = eval_dipolar_cells!(bk, 256)
+    kernel!(out, K.Xd, K.Yd, Id, Jd, nci, ncj; ndrange=(nci, ncj))
     return Array(out)       # Array() also synchronizes on GPUs
 end
 
