@@ -1,9 +1,7 @@
 # ---------------------------------------------------------------------------
 # Batched GPU assembly for dense kernels, generic over KernelAbstractions
-# backends (moved out of the CUDA extension). Which backends can run it is
-# decided at runtime by the device_svd_available probe — no vendor types are
-# referenced here. The CUDA extension still provides a CUDA-specialized method
-# of build_matrices_gpu_dense until the extensions are removed.
+# backends. Which backends can run it is decided at runtime by the
+# device_svd_available probe — no vendor types are referenced here.
 # ---------------------------------------------------------------------------
 
 # capability cache: does a device-side svd work for this backend type?

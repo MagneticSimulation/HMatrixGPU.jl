@@ -7,10 +7,11 @@ include("tree.jl")
 include("block.jl")
 include("aca.jl")
 include("hmatrix.jl")
+include("kernel_matrix.jl")
 include("assembly_gpu.jl")
 include("mult.jl")
 
-export ClusterTree, BlockTree, ACA_plus, HMatrix, info
+export ClusterTree, BlockTree, ACA_plus, HMatrix, info, KernelMatrix
 
 const groupsize = Ref(512)
 function set_groupsize(x)

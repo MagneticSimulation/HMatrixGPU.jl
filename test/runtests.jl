@@ -9,4 +9,5 @@ include("test_utils.jl")
     include("test_aca.jl")
     include("test_hmatrix.jl")
     include("test_hmatrix_vector.jl")
+    include("test_highlevel.jl")
 end

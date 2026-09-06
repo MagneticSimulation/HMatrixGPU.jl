@@ -195,6 +195,60 @@ function HMatrix(K::AbstractMatrix, X::ClusterTree, Y::ClusterTree; eta=1.5, eps
                              backend=B)
 end
 
+# ---------------------------------------------------------------------------
+# High-level constructor family: a kernel *function* g (plus point sets or
+# custom trees) instead of a hand-written lazy AbstractMatrix. All forms are
+# thin wrappers: they build the cluster trees, wrap g in a KernelMatrix and
+# forward to the low-level HMatrix(K, X, Y; ...) above — no parallel
+# implementation. The low-level constructor stays the full-control entry.
+# ---------------------------------------------------------------------------
+
+# square case: targets = sources = pts (do-block friendly: the function is
+# the first argument)
+function HMatrix(g::Function, pts; dims=1, max_points_per_leaf=32, kwargs...)
+    return HMatrix(g, pts, pts; dims=dims,
+                   max_points_per_leaf=max_points_per_leaf, kwargs...)
+end
+
+function HMatrix(g::Function, pts_t, pts_s; dims=1, max_points_per_leaf=32,
+                 backend=nothing, like=nothing, kwargs...)
+    Pt = _point_matrix(pts_t)
+    Ps = _point_matrix(pts_s)
+    # mixed target/source point sets are rejected when the landing backend
+    # would be decided from the data (API_DESIGN §4.4 (ii)); an explicit
+    # like=/backend= always wins and is checked by _resolve_landing below
+    if like === nothing && backend === nothing
+        Bt = KernelAbstractions.get_backend(Pt)
+        Bs = KernelAbstractions.get_backend(Ps)
+        Bt == Bs || error("target and source points live on different " *
+                          "backends ($Bt vs $Bs)")
+    end
+    B = _resolve_landing(like, backend, Pt, Ps)   # device follows the points
+    X = ClusterTree(Pt; max_points_per_leaf, dims)  # device input: downloaded once inside
+    Y = ClusterTree(Ps; max_points_per_leaf, dims)
+    K = KernelMatrix(g, X.coordinates, Y.coordinates; dims)
+    return HMatrix(K, X, Y; backend=B, kwargs...)
+end
+
+# custom trees: dims defaults to the trees' own dims
+function HMatrix(g::Function, X::ClusterTree, Y::ClusterTree; dims=nothing,
+                 kwargs...)
+    d = something(dims, X.dims)
+    (d == X.dims == Y.dims) ||
+        error("dims=$d conflicts with the trees' dims ($(X.dims), $(Y.dims))")
+    K = KernelMatrix(g, X.coordinates, Y.coordinates; dims=d)
+    return HMatrix(K, X, Y; kwargs...)
+end
+
+# user-provided lazy K, library-built trees (the data tier follows K inside
+# the low-level constructor)
+function HMatrix(K::AbstractMatrix, pts_t, pts_s; dims=1,
+                 max_points_per_leaf=32, kwargs...)
+    X = ClusterTree(_point_matrix(pts_t); max_points_per_leaf, dims)
+    Y = ClusterTree(_point_matrix(pts_s); max_points_per_leaf, dims)
+    return HMatrix(K, X, Y; kwargs...)
+end
+
 # GPU packing: build the three CSR operators with the factors already on the
 # device; the near-field data is gathered from the uploaded matrix by a kernel
 # near-field CSR index structure for the GPU packing path (host, indices only)

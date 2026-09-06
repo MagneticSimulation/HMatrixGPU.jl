@@ -31,7 +31,6 @@ frob_err = norm(U * V - block, 2)
 @test max_diff < epsilon / 100
 
 U_SVD, V_SVD = HMatrixGPU.SVD_recompress(U, V, epsilon / 10)
-println(size(U), size(U_SVD))
 
 y_aca = U_SVD * (V_SVD * x)
 
