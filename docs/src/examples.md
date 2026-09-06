@@ -17,13 +17,17 @@ ratio, matvec time, relative error).
 | [`scalar_laplace3d.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/scalar_laplace3d.jl) | 3D Laplace single-layer BEM on a Fibonacci sphere | `1/(4πr)` | explicit low-level | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
 | [`covariance_gaussian.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/covariance_gaussian.jl) | Gaussian covariance, GP/kriging in the unit cube | `σ²·exp(-r²/(2ℓ²))`, σ=1, ℓ=0.1 | high-level | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
 | [`vector_demag.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/vector_demag.jl) | dipolar demag tensor, thin-film slab, host-loop kernel | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | high-level, `dims=3` | `eta=1.5, eps=1e-4, dims=3` (ACA block sizes follow `dims`) | 2000 (6000×6000) |
-| [`hmatrix_vector.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/hmatrix_vector.jl) | same tensor, **device-side kernel evaluation** (advanced) | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | explicit low-level, device block evaluation | `eta=1.0, eps=1e-6, dims=3, blocks 3×3` | 2000 (6000×6000) |
+| [`hmatrix_vector.jl`](https://github.com/MagneticSimulation/HMatrixGPU.jl/blob/main/examples/hmatrix_vector.jl) | same tensor, **device-side kernel evaluation** (advanced) — one work item per cell pair | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | explicit low-level, device block evaluation | `eta=1.0, eps=1e-6, dims=3, blocks 3×3` | 2000 (6000×6000) |
 
 The three "high-level" scripts are the do-block form of the
 [manual](manual.md); `scalar_laplace3d.jl` shows the same workflow in the
 explicit low-level mode (custom struct + batched `getindex`), and
 `hmatrix_vector.jl` moves the block *evaluation* itself onto the device with
-a KernelAbstractions kernel.
+a KernelAbstractions kernel: one work item per cell pair evaluates the
+geometry once and writes the whole `3×3` block, and the tensor is computed as
+`(3R_cR_d - r²δ_cd)·t` with `t = -1/(4π·r²·r²·√r²)` — one division per pair,
+and `r⁵` decomposed into multiplications plus a single hardware `sqrt`
+instead of a software `pow`.
 
 ## Measured numbers
 

@@ -735,6 +735,108 @@ function info(hmatrix::HMatrix)
                 "compression_ratio" => original_size / compressed_size)
 end
 
+"""
+    hmatrix_blocks(H::HMatrix) -> (dense, lowrank)
+
+Reconstruct the leaf blocks of the assembled `HMatrix` from its CSR index
+arrays (works for CPU and GPU-resident matrices; only the index arrays are
+downloaded). Returns `(dense, lowrank)` where `dense` is a vector of
+`(rows, cols)` index ranges and `lowrank` a vector of `(rows, cols, rank)`.
+"""
+function hmatrix_blocks(H::HMatrix)
+    m = H.m
+    near_rowptr = Int.(collect(H.near_rowptr))
+    near_colval = Int.(collect(H.near_colval))
+    v_rowptr = Int.(collect(H.v_rowptr))
+    v_colval = Int.(collect(H.v_colval))
+    u_rowptr = Int.(collect(H.u_rowptr))
+    u_colval = Int.(collect(H.u_colval))
+    ranks = H.ranks
+
+    # ---- near field: a dense block is a maximal contiguous column run of a
+    #      row; rectangles are recovered by merging identical runs across
+    #      consecutive rows (dense blocks in one row are never column-adjacent
+    #      — the block tree merges such siblings) ----
+    dense = Tuple{UnitRange{Int},UnitRange{Int}}[]
+    open = Dict{Tuple{Int,Int},Int}()      # (c1, c2) => first row of the run
+    for i in 1:m
+        runs = Tuple{Int,Int}[]
+        p = near_rowptr[i] + 1             # near_rowptr holds 0-based offsets
+        while p <= near_rowptr[i + 1]
+            c1 = c2 = near_colval[p]
+            p += 1
+            while p <= near_rowptr[i + 1] && near_colval[p] == c2 + 1
+                c2 += 1
+                p += 1
+            end
+            push!(runs, (c1, c2))
+        end
+        closed = Tuple{Int,Int}[]
+        for run in keys(open)
+            run in runs || push!(closed, run)
+        end
+        for run in closed
+            push!(dense, (open[run]:i - 1, run[1]:run[2]))
+            delete!(open, run)
+        end
+        for run in runs
+            get!(open, run, i)
+        end
+    end
+    for (run, r1) in open
+        push!(dense, (r1:m, run[1]:run[2]))
+    end
+
+    # ---- far field: block bi owns vx buffer positions (cum[bi-1], cum[bi]].
+    #      A matrix row's U segment holds the (full) rank range of every block
+    #      containing that row — blocks it does not contain leave gaps, so the
+    #      segment is walked value by value and each block transition recorded ----
+    lowrank = Tuple{UnitRange{Int},UnitRange{Int},Int}[]
+    cum = cumsum(ranks)
+    rfirst = zeros(Int, length(ranks))
+    rlast = zeros(Int, length(ranks))
+    for i in 1:m
+        p1, p2 = u_rowptr[i], u_rowptr[i + 1]
+        p1 == p2 && continue
+        bi = 0
+        for p in p1 + 1:p2
+            nb = searchsortedfirst(cum, u_colval[p])
+            if nb != bi
+                bi = nb
+                rfirst[bi] == 0 && (rfirst[bi] = i)
+            end
+            rlast[bi] = i
+        end
+    end
+    a = 0
+    for bi in eachindex(ranks)
+        r = ranks[bi]
+        a2 = a + r
+        if r > 0 && rfirst[bi] != 0
+            cs = v_colval[v_rowptr[a + 1] + 1]     # columns: the run of the
+            ce = v_colval[v_rowptr[a2 + 1]]        # block's rank rows in V
+            push!(lowrank, (rfirst[bi]:rlast[bi], cs:ce, r))
+        end
+        a = a2
+    end
+
+    # exact invariants: the near CSR holds every dense-block entry once, and
+    # the leaves must tile the matrix exactly (the V/U CSRs hold the rank-r
+    # factors, not the block entries, so no per-side invariant exists there)
+    nnz_dense = sum(length(r) * length(c) for (r, c) in dense; init=0)
+    nnz_dense == length(H.near_data) ||
+        @warn "dense area mismatch" nnz_dense length(H.near_data)
+    area = nnz_dense + sum(length(r) * length(c) for (r, c, _) in lowrank; init=0)
+    area == H.m * H.n ||
+        @warn "reconstructed blocks do not tile the matrix exactly" area (H.m * H.n)
+
+    return dense, lowrank
+end
+
+# extension point: `HMatrixGPUPlotsExt` (ext/) adds a method when Plots.jl is
+# loaded
+function plot_hmatrix end
+
 # per-block scatter: block-row ii of the U factor goes to its segment in the
 # interleaved u CSR data (destinations recorded per block-row pair, so matrix
 # rows shared by several blocks never collide)

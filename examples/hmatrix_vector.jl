@@ -66,13 +66,15 @@ pts = rand(MersenneTwister(10), 3, N)
         jb = div(idy[3 * cj - 2] - 1, 3) + 1
         rx = X[1, ia] - Y[1, jb]; ry = X[2, ia] - Y[2, jb]; rz = X[3, ia] - Y[3, jb]
         r2 = rx * rx + ry * ry + rz * rz
-        denom = 4π * r2^2.5                   # ONE pow per cell pair
+        # N_cd = (3 R_c R_d - r² δ_cd) · t with t = -1/(4π r^5): one division
+        # per cell pair, and r^5 = r2*r2*sqrt(r2) keeps the software pow()
+        # sequence out of the kernel (sqrt is a single hardware instruction)
+        t = r2 >= 1e-24 ? -1.0 / (4π * r2 * r2 * sqrt(r2)) : 0.0
         for cb in 1:3, ca in 1:3              # position within the triple IS
             Rca = ca == 1 ? rx : (ca == 2 ? ry : rz)   # the component (1,2,3
             Rcb = cb == 1 ? rx : (cb == 2 ? ry : rz)   # in order) — no mod
             delta = ca == cb ? 1.0 : 0.0
-            val = r2 >= 1e-24 ? -(3.0 * Rca * Rcb - r2 * delta) / denom : 0.0
-            out[3 * ci - 3 + ca, 3 * cj - 3 + cb] = val
+            out[3 * ci - 3 + ca, 3 * cj - 3 + cb] = (3.0 * Rca * Rcb - r2 * delta) * t
         end
     end
 end
@@ -101,7 +103,7 @@ function Base.getindex(K::DipolarDemagGPU, i::Int, j::Int)
     Rc = c == 1 ? rx : (c == 2 ? ry : rz)
     Rd = d == 1 ? rx : (d == 2 ? ry : rz)
     delta = c == d ? 1.0 : 0.0
-    return -(3.0 * Rc * Rd - r2 * delta) / (4π * r2^2.5)
+    return -(3.0 * Rc * Rd - r2 * delta) / (4π * r2 * r2 * sqrt(r2))
 end
 
 # Batch entry — the only form the ACA assembly queries. Output and index sets

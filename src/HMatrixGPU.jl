@@ -12,6 +12,7 @@ include("assembly_gpu.jl")
 include("mult.jl")
 
 export ClusterTree, BlockTree, ACA_plus, HMatrix, info, KernelMatrix
+export hmatrix_blocks, plot_hmatrix
 
 const groupsize = Ref(512)
 function set_groupsize(x)

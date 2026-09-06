@@ -34,7 +34,7 @@ Every script follows the same contract:
 | [`scalar_laplace3d.jl`](scalar_laplace3d.jl) | explicit low-level | 3D Laplace single-layer BEM on a Fibonacci sphere | `1/(4πr)` | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
 | [`covariance_gaussian.jl`](covariance_gaussian.jl) | high-level (do-block) | Gaussian covariance, GP/kriging in the unit cube | `σ²·exp(-r²/(2ℓ²))`, σ=1, ℓ=0.1 | `eta=1.5, eps=1e-6` | 4000 (4000×4000) |
 | [`vector_demag.jl`](vector_demag.jl) | high-level (do-block, `dims=3`) | dipolar demag tensor, thin-film slab, host-loop kernel | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.5, eps=1e-4, dims=3` (ACA block sizes follow the `dims`: 3×3) | 2000 (6000×6000) |
-| [`hmatrix_vector.jl`](hmatrix_vector.jl) | explicit low-level, **device-side kernel evaluation** (advanced) | same tensor, block queries run on the device | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.0, eps=1e-6, dims=3` (block sizes follow the `dims`: 3×3) | 2000 (6000×6000) |
+| [`hmatrix_vector.jl`](hmatrix_vector.jl) | explicit low-level, **device-side kernel evaluation** (advanced) | same tensor, block queries run on the device (one work item per cell pair) | `-(3R_cR_d - r²δ_cd)/(4πr⁵)` | `eta=1.0, eps=1e-6, dims=3` (block sizes follow the `dims`: 3×3) | 2000 (6000×6000) |
 
 ## Measured numbers
 
@@ -110,3 +110,9 @@ example; `Array(y)` is the only synchronization.
   blocks on the host through the kernel function. When even that is the
   bottleneck, `hmatrix_vector.jl` shows the explicit low-level mode where the
   block queries run as a KernelAbstractions kernel directly on the device.
+  That kernel is written for GPU arithmetic: one work item per cell pair
+  evaluates the geometry once and writes the whole `3×3` block (with
+  `dims = 3` and the default block sizes, ACA queries arrive as whole cells),
+  and the tensor is computed as `(3R_cR_d - r²δ_cd)·t` with
+  `t = -1/(4π·r²·r²·√r²)` — one division per pair, and `r⁵` decomposed into
+  multiplications plus a single hardware `sqrt` instead of a software `pow`.

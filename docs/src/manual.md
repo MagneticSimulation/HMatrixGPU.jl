@@ -150,7 +150,12 @@ right tool when that price matters or when you need:
 - **device-side block evaluation** — a batched `getindex` that launches a
   KernelAbstractions kernel on the GPU, so ACA block queries never
   materialize on the host; `examples/hmatrix_vector.jl` is the complete
-  worked example of this pattern.
+  worked example of this pattern. When writing such a kernel, evaluate one
+  *cell pair* per work item (with `dims = d` and the default block sizes the
+  queries arrive as whole cells, so the geometry is computed once and the
+  whole `d × d` block written), and decompose fractional powers by hand —
+  `r⁵ = r²·r²·√r²` costs two multiplications and one hardware `sqrt`, while
+  `r2^2.5` compiles to a software `pow` sequence.
 
 The high-level mode deliberately does *not* offer an index-form do-block
 (`do i, j`): it would be indistinguishable in the signature from the
