@@ -794,10 +794,12 @@ function hmatrix_blocks(H::HMatrix)
     # factors, not the block entries, so no per-side invariant exists there)
     nnz_dense = sum(length(r) * length(c) for (r, c) in dense; init=0)
     nnz_dense == length(H.near_data) ||
-        @warn "dense area mismatch" nnz_dense length(H.near_data)
+        error("hmatrix_blocks: dense area mismatch (reconstructed $nnz_dense, " *
+              "CSR nnz $(length(H.near_data)))")
     area = nnz_dense + sum(length(r) * length(c) for (r, c, _) in lowrank; init=0)
     area == H.m * H.n ||
-        @warn "reconstructed blocks do not tile the matrix exactly" area (H.m * H.n)
+        error("hmatrix_blocks: reconstructed blocks do not tile the matrix " *
+              "exactly (area $area, expected $(H.m * H.n))")
 
     return dense, lowrank
 end
