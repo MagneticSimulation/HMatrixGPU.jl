@@ -140,11 +140,19 @@ the package implements the functionality.
 | `"metal"` / `"apple"` | Apple GPU | `Metal.MetalBackend()`   |
 
 `backend=` also accepts a KernelAbstractions backend object directly, and
-`backend = KernelAbstractions.get_backend(x)` places the factors next to `x`
-. Requesting a
-GPU backend whose vendor package is not loaded errors with "run `using CUDA`
-first"; a loaded package without a functional device errors as well. For a
-soft fallback in scripts, wrap the request in `try`/`catch` — see the examples.
+`backend = KernelAbstractions.get_backend(x)` places the factors next to `x`.
+Requesting a GPU backend whose vendor package is not loaded errors with
+"run `using CUDA` first"; a loaded package without a functional device errors
+as well. For a soft fallback in scripts, wrap the request in `try`/`catch` —
+see the examples.
+
+## Related packages
+
+[HMatrices.jl](https://github.com/IntegralEquations/HMatrices.jl) covers the same
+problem family on the CPU — a recursive block tree with per-block BLAS and
+`Threads`/`Distributed` parallelism. HMatrixGPU.jl is the GPU counterpart: the
+𝓗-matrix is flattened into CSR device arrays so the matvec runs as a few fused
+KernelAbstractions kernels — pick whichever matches your hardware.
 
 ## Documentation
 
