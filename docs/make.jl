@@ -1,3 +1,6 @@
+# headless GR so @example plots render during the docs build (no display)
+ENV["GKSwstype"] = "100"
+
 using HMatrixGPU
 using Documenter
 using Documenter: Remotes
