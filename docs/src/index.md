@@ -11,9 +11,9 @@ accelerates the matrix–vector product on **GPUs**. It is written with
 [KernelAbstractions.jl](https://github.com/JuliaGPU/KernelAbstractions.jl), so
 the same code runs on NVIDIA, AMD, Intel and Apple GPUs as well as the CPU.
 
-The package is vendor-neutral: its only non-stdlib dependency is
-KernelAbstractions, and its only package extension is an optional plotting
-one (Plots.jl). You install and load whichever vendor package you want;
+The package is vendor-neutral: its only non-stdlib dependencies are
+KernelAbstractions and the tiny RecipesBase (for `plot(H)` block-pattern
+rendering). You install and load whichever vendor package you want;
 instances are placed by their `backend=` keyword alone (nothing specified
 means CPU), so CPU and GPU matrices — even from different vendors — coexist
 in one process and can be multiplied in alternation.

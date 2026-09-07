@@ -62,23 +62,24 @@ info
 sparsify_hmatrix
 ```
 
-## Plotting (optional Plots.jl extension)
+## Plotting
 
 ```@docs
 hmatrix_blocks
 ```
 
-`plot_hmatrix(H::HMatrix; nx = 600, ny = 600, kwargs...) -> Plots.Plot` —
-heatmap of the block distribution: teal = dense (near-field) blocks, amber =
-low-rank (far-field) blocks, origin `(0, 0)` at the bottom left (matrix
-entry `(1, 1)` sits there). No title or axis labels, so a caption can be
-provided externally; `nx`/`ny` set the raster resolution and extra
-`kwargs...` go to `Plots.heatmap`. Save the result with
+`plot(H::HMatrix; kwargs...)` — via a RecipesBase recipe: the block structure
+of the assembled matrix — teal = dense (near-field) blocks, amber = low-rank
+(far-field) blocks, origin `(0, 0)` at the bottom left (matrix entry `(1, 1)`
+sits there). No title or axis labels, so a caption can be provided externally;
+extra `kwargs...` go to the plotting backend. Save the result with
 `Plots.savefig(p, "hmatrix_pattern.png")`.
 
-The method is provided by the `HMatrixGPUPlotsExt` package extension and
-becomes available once [Plots.jl](https://github.com/JuliaPlots/Plots.jl) is
-loaded in the session (`using Plots`). Both functions are exported.
+The recipe is part of the package itself (RecipesBase is a hard dependency),
+so `plot(H)` works with any recipe-aware backend — e.g.
+[Plots.jl](https://github.com/JuliaPlots/Plots.jl), once it is loaded in the
+session (`using Plots`). `hmatrix_blocks` is exported; `plot` comes from the
+backend.
 
 ## Backends and utilities
 

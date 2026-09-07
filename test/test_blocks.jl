@@ -5,8 +5,8 @@ using Test
 
 # ---------------------------------------------------------------------------
 # hmatrix_blocks: the CSR index arrays must reconstruct leaf blocks that tile
-# the matrix exactly — the packing invariants behind plot_hmatrix (and now
-# hard errors inside hmatrix_blocks). Only the index arrays are downloaded,
+# the matrix exactly — the packing invariants behind the plot(H) recipe (and
+# now hard errors inside hmatrix_blocks). Only the index arrays are downloaded,
 # so the same assertions run for CPU-resident and GPU-resident matrices.
 # ---------------------------------------------------------------------------
 

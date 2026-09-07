@@ -2,17 +2,19 @@ module HMatrixGPU
 
 using Printf
 using KernelAbstractions
+using RecipesBase
 
 include("tree.jl")
 include("block.jl")
 include("aca.jl")
 include("hmatrix.jl")
+include("plotting.jl")
 include("kernel_matrix.jl")
 include("assembly_gpu.jl")
 include("mult.jl")
 
 export ClusterTree, BlockTree, ACA_plus, HMatrix, info, KernelMatrix
-export hmatrix_blocks, plot_hmatrix
+export hmatrix_blocks
 
 const groupsize = Ref(512)
 function set_groupsize(x)
