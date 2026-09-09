@@ -14,36 +14,6 @@ Typical applications include boundary-element matrices, covariance and
 spatial-statistics kernels, and the demagnetization tensors of micromagnetic
 simulations.
 
-## Features
-
-- **Cluster tree** (median/bbox split) and **block tree** with the standard
-  admissibility condition `dist > η·(r_X + r_Y)`.
-- **Adaptive Cross Approximation (ACA+)** with partial pivoting and optional
-  **SVD recompression** of the low-rank blocks.
-- **High-level API**: build straight from a kernel *function* and point sets —
-  `HMatrix(pts) do x, y ... end` — the library derives the lazy `KernelMatrix`,
-  the cluster trees and all bookkeeping; a vector kernel (a `d×d`-valued `g`)
-  needs a single `dims=d`.
-- **Matrix-free assembly**: the matrix never needs to exist as a dense array —
-  only block-wise `getindex` queries are required, so `K` can be any
-  `AbstractMatrix` (including a lazy kernel evaluation on the GPU).
-- **Flat, Structure-of-Arrays layout** of the 𝓗-matrix so the matvec runs as a
-  handful of fused GPU kernels instead of recursive tree traversals.
-- **Block-pattern plotting** via a RecipesBase recipe: `plot(H)` renders the
-  block structure once a plotting backend such as Plots.jl is loaded
-  (teal = dense, amber = low-rank); `hmatrix_blocks(H)` reconstructs the
-  leaf blocks.
-- **Multi-backend** via KernelAbstractions: CPU, CUDA, AMDGPU, oneAPI and Metal.
-  The package itself has zero GPU dependencies — the vendor package is the
-  user's choice and is simply loaded with `using` (loading it has zero side
-  effects on HMatrixGPU). Where an `HMatrix` lands is decided per instance by
-  the explicit `backend=` keyword (default `CPU()`), and with no global
-  backend state, CPU and GPU instances — even from different vendors —
-  coexist in one process and interleave freely.
-
-Runnable application examples (scalar BEM, covariance, vector demagnetization
-kernels) are in [examples/](examples/README.md).
-
 ## Installation
 
 ```julia
@@ -100,21 +70,11 @@ end
 y = H * CuArray(x)   # x must already live on the GPU (e.g. CuArray)
 ```
 
-`backend="cuda"` resolves the loaded CUDA package at construction time — there
-is no auto-detection and no global state: the user (or a higher-level package)
-chooses the backend, the library implements the functionality. The CPU and GPU
+`backend="cuda"` resolves the loaded CUDA package at construction time. The CPU and GPU
 matrices above are independent instances and can be used interleaved.
 
 The `HMatrix` stores all blocks in flat device arrays so that the matvec runs
 as three kernels (a permutation, `V*x`, and a fused near-field/`U` kernel).
-
-With the high-level API the matrix never materializes at all: the assembly
-queries only the blocks it needs through the kernel function, and the factors
-land on the chosen backend. For large-scale problems where even the host-side
-block evaluation is the bottleneck, the explicit low-level mode lets you
-evaluate the queried blocks with a KernelAbstractions kernel directly on the
-device. A complete, runnable example (the dipolar demag tensor on a GPU) is
-provided in [`examples/hmatrix_vector.jl`](examples/hmatrix_vector.jl).
 
 > [!NOTE]
 > The compressed matrix is stored as three CSR operators (near field, far-field
